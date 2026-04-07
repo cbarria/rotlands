@@ -1,5 +1,5 @@
+# Railpack also reads this file — keep it simple (avoid **/.env.* quirks).
 **/node_modules
 **/dist
 .git
 .env
-**/.env.*
