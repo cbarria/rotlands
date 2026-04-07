@@ -1,6 +1,6 @@
 import Phaser from "phaser";
 import { io } from "socket.io-client";
-import { registerProceduralTextures } from "../art/proceduralPixels.js";
+import { registerProceduralTextures, uiItemTextureKey } from "../art/proceduralPixels.js";
 
 const TILE = 32;
 /** Match server `server/src/game/shop.js` */
@@ -60,15 +60,31 @@ function isGearInvType(t) {
   );
 }
 
+/** @param {string | undefined} type */
+function itemShortName(type) {
+  const m = {
+    weapon: "Sword",
+    armor_helmet: "Helmet",
+    armor_chest: "Chest",
+    armor_boots: "Boots",
+    potion: "Potion",
+    bread: "Bread",
+    coin: "Coin",
+  };
+  return m[/** @type {keyof typeof m} */ (type)] || String(type || "").slice(0, 8) || "—";
+}
+
 /** @param {any} meta */
-function formatGearStatsLine(meta) {
+function formatGearStatsReadable(meta) {
   if (!meta || typeof meta !== "object") return "";
-  const r = meta.rarity ? String(meta.rarity).slice(0, 1).toUpperCase() : "";
-  const d = meta.dmg != null ? `D${meta.dmg}` : "";
-  const f = meta.def != null ? `Df${meta.def}` : "";
-  const h = meta.hp != null ? `H+${meta.hp}` : "";
-  const parts = [r && `${r}:`, d, f, h].filter(Boolean);
-  return parts.join(" ");
+  const parts = [];
+  if (meta.dmg != null) parts.push(`ATK +${meta.dmg}`);
+  if (meta.def != null) parts.push(`DEF +${meta.def}`);
+  if (meta.hp != null) parts.push(`HP +${meta.hp}`);
+  if (meta.heal != null) parts.push(`Heal ${meta.heal}`);
+  const r = meta.rarity ? String(meta.rarity).toLowerCase() : "";
+  const tag = r === "epic" ? "Epic  " : r === "rare" ? "Rare  " : "";
+  return (tag + parts.join("  ")).trim();
 }
 const SHOP_MENU_LINES = 12;
 
@@ -205,8 +221,10 @@ export class GameScene extends Phaser.Scene {
     this._hudHintText = null;
     /** @type {Phaser.GameObjects.Rectangle[]} */
     this._invSlotBgs = [];
-    /** @type {Phaser.GameObjects.Rectangle[]} */
+    /** @type {Phaser.GameObjects.Image[]} */
     this._invSlotIcons = [];
+    /** @type {Phaser.GameObjects.Text[]} */
+    this._invSlotLabels = [];
     /** @type {Phaser.GameObjects.Text[]} */
     this._invSlotQty = [];
     /** @type {Phaser.GameObjects.Text[]} */
@@ -241,10 +259,12 @@ export class GameScene extends Phaser.Scene {
     this._eqDragInvIndex = null;
     /** @type {Record<string, Phaser.GameObjects.Zone>} */
     this._eqDropZones = {};
-    /** @type {Record<string, Phaser.GameObjects.Rectangle>} */
-    this._eqIconRects = {};
+    /** @type {Record<string, Phaser.GameObjects.Image>} */
+    this._eqIconImages = {};
     /** @type {Record<string, Phaser.GameObjects.Text>} */
-    this._eqLineTexts = {};
+    this._eqNameTexts = {};
+    /** @type {Record<string, Phaser.GameObjects.Text>} */
+    this._eqStatTexts = {};
     /** @type {(() => void) | null} */
     this._eqGlobalPointerUp = null;
     /** @type {"main" | "buy" | "sell"} */
@@ -923,8 +943,8 @@ export class GameScene extends Phaser.Scene {
 
     const cx = GAME_W / 2;
     const cy = GAME_H / 2;
-    const panelW = 368;
-    const panelH = 204;
+    const panelW = 430;
+    const panelH = 248;
     const ZFrame = 0x1a4a22;
     const ZCream = 0xe8dcc4;
     const ZInner = 0xd4c4a8;
@@ -967,7 +987,7 @@ export class GameScene extends Phaser.Scene {
     );
     push(
       this.add
-        .text(cx, cy - panelH / 2 + 38, "Tab · 1–0 select · click use / equip · gold = worn", {
+        .text(cx, cy - panelH / 2 + 38, "Tab · 1–0 select slot · click = use / toggle gear · gold frame = equipped", {
           fontSize: "9px",
           color: "#4a3830",
           fontFamily: "monospace",
@@ -978,15 +998,15 @@ export class GameScene extends Phaser.Scene {
     );
 
     const cols = 5;
-    const slotSize = 36;
-    const gap = 10;
+    const slotSize = 42;
+    const gap = 8;
     const gridW = cols * slotSize + (cols - 1) * gap;
-    const gridH = 2 * slotSize + gap;
     const gridTop = cy - panelH / 2 + 56;
     const startX = cx - gridW / 2 + slotSize / 2;
 
     this._invSlotBgs = [];
     this._invSlotIcons = [];
+    this._invSlotLabels = [];
     this._invSlotQty = [];
     this._invSlotHotkeys = [];
     this._invSlotZones = [];
@@ -1004,9 +1024,21 @@ export class GameScene extends Phaser.Scene {
         .setDepth(d + 6);
 
       const icon = this.add
-        .rectangle(sx, sy - 1, 22, 22, 0x6a6050, 0.35)
+        .image(sx, sy - 7, "px_ui_slot_empty")
         .setScrollFactor(0)
-        .setDepth(d + 7);
+        .setDepth(d + 7)
+        .setDisplaySize(34, 34);
+
+      const caption = this.add
+        .text(sx, sy + slotSize / 2 - 10, "", {
+          fontSize: "8px",
+          color: "#3a3028",
+          fontFamily: "monospace",
+          align: "center",
+        })
+        .setOrigin(0.5, 0.5)
+        .setScrollFactor(0)
+        .setDepth(d + 8);
 
       const lab = i === 9 ? "0" : String(i + 1);
       const hotkey = this.add
@@ -1017,24 +1049,26 @@ export class GameScene extends Phaser.Scene {
         })
         .setOrigin(0, 0)
         .setScrollFactor(0)
-        .setDepth(d + 8);
+        .setDepth(d + 9);
 
       const qty = this.add
-        .text(sx + slotSize / 2 - 4, sy + slotSize / 2 - 3, "", {
+        .text(sx + slotSize / 2 - 4, sy + slotSize / 2 - 5, "", {
           fontSize: "10px",
-          color: "#3a3028",
+          color: "#6b1818",
           fontFamily: "monospace",
         })
         .setOrigin(1, 1)
         .setScrollFactor(0)
-        .setDepth(d + 8);
+        .setDepth(d + 9);
 
       push(bg);
       push(icon);
+      push(caption);
       push(hotkey);
       push(qty);
       this._invSlotBgs.push(bg);
       this._invSlotIcons.push(icon);
+      this._invSlotLabels.push(caption);
       this._invSlotHotkeys.push(hotkey);
       this._invSlotQty.push(qty);
 
@@ -1136,42 +1170,23 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * @param {Phaser.GameObjects.Rectangle} icon
-   * @param {null | { type: string, qty: number }} s
+   * @param {Phaser.GameObjects.Image} img
+   * @param {null | { type: string, qty: number, meta?: any }} s
    */
-  setSlotIconVisual(icon, s) {
+  applyItemIconImage(img, s) {
+    if (!img || !img.setTexture) return;
+    img.clearTint();
     if (!s || s.qty < 1) {
-      icon.setFillStyle(0x2a2838, 0.35);
-      icon.setSize(22, 22);
+      img.setTexture("px_ui_slot_empty");
+      img.setAlpha(0.55);
       return;
     }
-    const t = s.type;
-    if (t === "potion") {
-      const r = s.meta?.rarity;
-      icon.setFillStyle(r === "epic" ? 0xbb66ff : r === "rare" ? 0x44aa77 : 0x2e8b4f, 1);
-      icon.setSize(14, 24);
-    } else if (t === "weapon") {
-      const r = s.meta?.rarity;
-      icon.setFillStyle(r === "epic" ? 0xffcc66 : r === "rare" ? 0x88aaee : 0x6b8cce, 1);
-      icon.setSize(30, 10);
-    } else if (t === "armor_helmet") {
-      icon.setFillStyle(0x9e8c6e, 1);
-      icon.setSize(22, 16);
-    } else if (t === "armor_chest") {
-      icon.setFillStyle(0x7a6b9c, 1);
-      icon.setSize(24, 22);
-    } else if (t === "armor_boots") {
-      icon.setFillStyle(0x5c6b7a, 1);
-      icon.setSize(20, 14);
-    } else if (t === "bread") {
-      icon.setFillStyle(0xb88a4a, 1);
-      icon.setSize(20, 18);
-    } else if (t === "coin") {
-      icon.setFillStyle(0xd4af37, 1);
-      icon.setSize(16, 16);
-    } else {
-      icon.setFillStyle(0x6a6678, 1);
-      icon.setSize(22, 18);
+    img.setAlpha(1);
+    img.setTexture(uiItemTextureKey(s.type));
+    const r = s.meta?.rarity;
+    if (s.type === "weapon" || s.type === "potion") {
+      if (r === "rare") img.setTint(0x9cd3ff);
+      else if (r === "epic") img.setTint(0xffe08a);
     }
   }
 
@@ -1217,7 +1232,9 @@ export class GameScene extends Phaser.Scene {
       const s = slots[i] || null;
       const icon = this._invSlotIcons[i];
       const qty = this._invSlotQty[i];
-      if (icon) this.setSlotIconVisual(icon, s);
+      const cap = this._invSlotLabels[i];
+      if (icon) this.applyItemIconImage(icon, s);
+      if (cap) cap.setText(s && s.qty >= 1 ? itemShortName(s.type) : "");
       if (qty) qty.setText(s && s.qty > 1 ? `${s.qty}` : "");
     }
     this.updateSelectionHighlight();
@@ -2442,8 +2459,8 @@ export class GameScene extends Phaser.Scene {
     if (this._eqUiBuilt) return;
     this._eqUiBuilt = true;
     const d = EQ_PANEL_DEPTH;
-    const w = 430;
-    const h = 348;
+    const w = 548;
+    const h = 332;
     const cx = GAME_W / 2;
     const cy = GAME_H / 2;
     const push = (o) => {
@@ -2485,8 +2502,8 @@ export class GameScene extends Phaser.Scene {
 
     push(
       this.add
-        .text(cx, cy - h / 2 + 28, "GEAR", {
-          fontSize: "20px",
+        .text(cx, cy - h / 2 + 26, "GEAR", {
+          fontSize: "22px",
           color: "#2a1810",
           fontFamily: "monospace",
           stroke: "#e8dcc4",
@@ -2498,66 +2515,133 @@ export class GameScene extends Phaser.Scene {
     );
     push(
       this.add
-        .text(cx, cy - h / 2 + 52, "I · Esc · Tab bag · drag onto Equip or hotkey + Equip", {
-          fontSize: "9px",
-          color: "#4a3830",
-          fontFamily: "monospace",
-        })
+        .text(
+          cx,
+          cy - h / 2 + 50,
+          "I / Esc  ·  Tab = bag  ·  drag item here or choose # + Equip",
+          {
+            fontSize: "9px",
+            color: "#4a3830",
+            fontFamily: "monospace",
+          },
+        )
         .setOrigin(0.5)
         .setScrollFactor(0)
         .setDepth(d + 4),
     );
 
-    const rowY0 = cy - h / 2 + 90;
-    const rowStep = 58;
+    const rowY0 = cy - h / 2 + 84;
+    const rowStep = 56;
+    const leftX = cx - w / 2 + 16;
     let ri = 0;
     for (const eqKind of EQ_KINDS) {
       const ry = rowY0 + ri * rowStep;
       ri++;
-      const lx = cx - w / 2 + 20;
+
       push(
         this.add
-          .text(lx, ry, `${EQ_LABEL[eqKind]}:`, {
-            fontSize: "13px",
-            color: "#2a1810",
+          .rectangle(leftX, ry, w - 32, 48, 0xcfc0a8, 0.35)
+          .setStrokeStyle(1, 0x5a8a5a)
+          .setScrollFactor(0)
+          .setDepth(d + 5),
+      );
+
+      push(
+        this.add
+          .text(leftX + 6, ry, EQ_LABEL[eqKind], {
+            fontSize: "11px",
+            color: "#1a3018",
             fontFamily: "monospace",
           })
           .setOrigin(0, 0.5)
           .setScrollFactor(0)
-          .setDepth(d + 6),
+          .setDepth(d + 7),
       );
-      const icon = this.add
-        .rectangle(lx + 92, ry, 38, 38, ZInner, 1)
+
+      const iconX = leftX + 78;
+      const iconFrame = this.add
+        .rectangle(iconX, ry, 46, 46, ZInner, 1)
         .setStrokeStyle(2, 0x3d6c48)
         .setScrollFactor(0)
         .setDepth(d + 6);
+      push(iconFrame);
+      const icon = this.add
+        .image(iconX, ry, "px_ui_slot_empty")
+        .setScrollFactor(0)
+        .setDepth(d + 8)
+        .setDisplaySize(40, 40);
       push(icon);
-      this._eqIconRects[eqKind] = icon;
-      const line = this.add
-        .text(lx + 128, ry, "(empty)", {
-          fontSize: "11px",
-          color: "#5a5048",
+      this._eqIconImages[eqKind] = icon;
+
+      const textX = leftX + 118;
+      const nameLine = this.add
+        .text(textX, ry - 12, "(empty slot)", {
+          fontSize: "12px",
+          color: "#2a1810",
           fontFamily: "monospace",
         })
         .setOrigin(0, 0.5)
         .setScrollFactor(0)
         .setDepth(d + 7);
-      push(line);
-      this._eqLineTexts[eqKind] = line;
+      push(nameLine);
+      this._eqNameTexts[eqKind] = nameLine;
 
-      const dropW = 112;
-      const dropH = 34;
-      const dx = cx + w / 2 - 18 - dropW / 2;
+      const statLine = this.add
+        .text(textX, ry + 12, "—", {
+          fontSize: "10px",
+          color: "#4a4038",
+          fontFamily: "monospace",
+          wordWrap: { width: 260 },
+        })
+        .setOrigin(0, 0.5)
+        .setScrollFactor(0)
+        .setDepth(d + 7);
+      push(statLine);
+      this._eqStatTexts[eqKind] = statLine;
+
+      const btnY = ry;
+      const clearW = 56;
+      const clearH = 28;
+      const clearCx = cx + w / 2 - 130;
       push(
         this.add
-          .rectangle(dx, ry, dropW, dropH, 0x284830, 1)
+          .rectangle(clearCx, btnY, clearW, clearH, 0x6b3830, 1)
+          .setStrokeStyle(2, 0x4a2018)
+          .setScrollFactor(0)
+          .setDepth(d + 6),
+      );
+      push(
+        this.add
+          .text(clearCx, btnY, "Clear", {
+            fontSize: "9px",
+            color: "#f5e0dc",
+            fontFamily: "monospace",
+          })
+          .setOrigin(0.5)
+          .setScrollFactor(0)
+          .setDepth(d + 7),
+      );
+      const stripZ = this.add
+        .zone(clearCx, btnY, clearW + 6, clearH + 6)
+        .setScrollFactor(0)
+        .setDepth(d + 9)
+        .setInteractive({ useHandCursor: true });
+      push(stripZ);
+      stripZ.on("pointerup", () => this.stripEquipKind(eqKind));
+
+      const dropW = 96;
+      const dropH = 30;
+      const equipCx = cx + w / 2 - 48;
+      push(
+        this.add
+          .rectangle(equipCx, btnY, dropW, dropH, 0x284830, 1)
           .setStrokeStyle(2, 0x3d6c48)
           .setScrollFactor(0)
           .setDepth(d + 6),
       );
       push(
         this.add
-          .text(dx, ry, "Equip", {
+          .text(equipCx, btnY, "Equip", {
             fontSize: "10px",
             color: "#e8f8e8",
             fontFamily: "monospace",
@@ -2567,33 +2651,13 @@ export class GameScene extends Phaser.Scene {
           .setDepth(d + 7),
       );
       const dropZ = this.add
-        .zone(dx, ry, dropW + 10, dropH + 10)
+        .zone(equipCx, btnY, dropW + 10, dropH + 10)
         .setScrollFactor(0)
-        .setDepth(d + 8)
+        .setDepth(d + 9)
         .setInteractive({ useHandCursor: true });
       push(dropZ);
       dropZ.on("pointerup", () => this.tryEquipSelectionToKind(eqKind));
       this._eqDropZones[eqKind] = dropZ;
-
-      const sx = dx - dropW / 2 - 48;
-      push(
-        this.add
-          .text(sx, ry, "Off", {
-            fontSize: "10px",
-            color: "#8c3830",
-            fontFamily: "monospace",
-          })
-          .setOrigin(0.5)
-          .setScrollFactor(0)
-          .setDepth(d + 7),
-      );
-      const stripZ = this.add
-        .zone(sx, ry, 40, 28)
-        .setScrollFactor(0)
-        .setDepth(d + 8)
-        .setInteractive({ useHandCursor: true });
-      push(stripZ);
-      stripZ.on("pointerup", () => this.stripEquipKind(eqKind));
     }
 
     this.setEquipmentPanelVisible(false);
@@ -2647,52 +2711,25 @@ export class GameScene extends Phaser.Scene {
     const eq = inv?.equipment || {};
     for (const kind of EQ_KINDS) {
       const idx = eq[kind];
-      const icon = this._eqIconRects[kind];
-      const line = this._eqLineTexts[kind];
-      if (!line || !icon) continue;
+      const icon = this._eqIconImages[kind];
+      const nameT = this._eqNameTexts[kind];
+      const statT = this._eqStatTexts[kind];
+      if (!nameT || !statT || !icon) continue;
       const cell = Number.isInteger(idx) ? slots[idx] : null;
       if (cell && cell.qty > 0 && invTypeMatchesEquipKind(kind, cell.type)) {
-        this.paintEqSlotIcon(icon, cell);
-        const nm =
-          cell.type === "weapon"
-            ? "Wpn"
-            : cell.type === "armor_helmet"
-              ? "Helm"
-              : cell.type === "armor_chest"
-                ? "Chest"
-                : "Boots";
-        line.setText(`${nm} · slot ${(idx ?? 0) + 1}  ${formatGearStatsLine(cell.meta)}`);
-        line.setColor("#2a1810");
+        this.applyItemIconImage(icon, cell);
+        nameT.setText(`${itemShortName(cell.type)}  ·  bag slot ${(idx ?? 0) + 1}`);
+        nameT.setColor("#1a1810");
+        const st = formatGearStatsReadable(cell.meta);
+        statT.setText(st || "—");
+        statT.setColor("#3d3028");
       } else {
-        icon.setFillStyle(0xd4c4a8, 1);
-        icon.setStrokeStyle(2, 0x3d6c48);
-        icon.setSize(38, 38);
-        line.setText("(empty)");
-        line.setColor("#5a5048");
+        this.applyItemIconImage(icon, null);
+        nameT.setText("(empty slot)");
+        nameT.setColor("#5a5048");
+        statT.setText("Use Equip after selecting matching gear in bag");
+        statT.setColor("#6a6058");
       }
-    }
-  }
-
-  /** @param {Phaser.GameObjects.Rectangle} rect @param {{ type: string, meta?: any }} s */
-  paintEqSlotIcon(rect, s) {
-    if (!rect) return;
-    const t = s.type;
-    if (t === "weapon") {
-      const r = s.meta?.rarity;
-      rect.setFillStyle(r === "epic" ? 0xffcc66 : r === "rare" ? 0x88aaee : 0x6b8cce, 1);
-      rect.setSize(36, 12);
-    } else if (t === "armor_helmet") {
-      rect.setFillStyle(0x9e8c6e, 1);
-      rect.setSize(28, 22);
-    } else if (t === "armor_chest") {
-      rect.setFillStyle(0x7a6b9c, 1);
-      rect.setSize(30, 26);
-    } else if (t === "armor_boots") {
-      rect.setFillStyle(0x5c6b7a, 1);
-      rect.setSize(26, 16);
-    } else {
-      rect.setFillStyle(0x2a2838, 1);
-      rect.setSize(38, 38);
     }
   }
 

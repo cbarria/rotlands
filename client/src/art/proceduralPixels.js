@@ -45,6 +45,19 @@ const P = {
   d: 0x4a4e5c,
   D: 0x6e7488,
   p: 0xb0b8c8,
+  /** UI item icons (blade / armor / flask) */
+  A: 0xd8dce3,
+  C: 0x7d8696,
+  Q: 0xc9a227,
+  E: 0x6b5344,
+  K: 0x3d6b55,
+  O: 0x4a7cbe,
+  N: 0x2a4a3a,
+  V: 0x8b7355,
+  W: 0x5c4a3a,
+  Y: 0x654b8c,
+  Z: 0x4a3d6e,
+  x: 0x3d5c78,
 };
 
 function paint(scene, key, rows, palette) {
@@ -222,6 +235,146 @@ const ITEM_COIN = [
   "________________",
 ];
 
+/** Sword — readable blade + gold guard */
+const UI_ITEM_SWORD = [
+  "________________",
+  "____________CC__",
+  "___________CAAC_",
+  "__________CAAAC_",
+  "_________QCQCCC_",
+  "________QCQQCCC_",
+  "_______QCC______",
+  "______EKKE______",
+  "_____EKKKKE_____",
+  "_____KKooKK_____",
+  "______KooK______",
+  "_______KK_______",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+];
+
+/** Closed helm */
+const UI_ITEM_HELM = [
+  "________________",
+  "_______VVVV_____",
+  "______VAAAAV____",
+  "_____VAAooAAV___",
+  "_____VAooooAV___",
+  "_____VoooooV___",
+  "_____V_oooo_V___",
+  "______VooooV____",
+  "______VWWWWV____",
+  "_______VWWV_____",
+  "________VV______",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+];
+
+/** Tunic / chest */
+const UI_ITEM_CHEST = [
+  "________________",
+  "________YY______",
+  "_______YYYY_____",
+  "______YYYYYY____",
+  "_____YYooooYY___",
+  "_____YooooooY___",
+  "_____YooooooY___",
+  "_____YYYYYYYY___",
+  "_______YYYY_____",
+  "______YYYYYY____",
+  "_____YY____YY___",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+];
+
+/** Pair of boots */
+const UI_ITEM_BOOTS = [
+  "________________",
+  "________________",
+  "_______NN_NN____",
+  "______Nxx_Nxx___",
+  "______Nxx_Nxx___",
+  "______NNN_NNN___",
+  "_____Wxx_Wxx____",
+  "_____WWW_WWW____",
+  "______WW___WW___",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+];
+
+/** Potion flask */
+const UI_ITEM_POTION = [
+  "________________",
+  "________KK______",
+  "________oo______",
+  "_______oooo_____",
+  "_______KNNK_____",
+  "______KNKKKN____",
+  "_____KNKKKKN____",
+  "_____NKKKKKN____",
+  "_____NKKKKKN____",
+  "______NKKKN_____",
+  "_______NNN______",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+];
+
+/** Loaf */
+const UI_ITEM_BREAD = [
+  "________________",
+  "________________",
+  "________________",
+  "_______QQQ______",
+  "______QQwQQ_____",
+  "_____QwwwwwQ____",
+  "_____QwwwwwQ____",
+  "______QQQQQ_____",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+];
+
+/** Empty inventory slot */
+const UI_SLOT_EMPTY = [
+  "________________",
+  "________________",
+  "____oooooooo____",
+  "____o______o____",
+  "____o______o____",
+  "____o______o____",
+  "____o______o____",
+  "____o______o____",
+  "____oooooooo____",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+  "________________",
+];
+
 const TILE_GRASS = [
   "lmlmlmlmlmlmlmlm",
   "mlmlmlmlmlmymlym",
@@ -358,6 +511,28 @@ const TILE_GRASS_PATCH = [
   "mlmlmlmlmlmlmlml",
 ];
 
+/** Texture key for inventory / gear UI (Phaser Image). */
+export function uiItemTextureKey(type) {
+  switch (String(type || "")) {
+    case "weapon":
+      return "px_ui_item_sword";
+    case "armor_helmet":
+      return "px_ui_item_helm";
+    case "armor_chest":
+      return "px_ui_item_chest";
+    case "armor_boots":
+      return "px_ui_item_boots";
+    case "potion":
+      return "px_ui_item_potion";
+    case "bread":
+      return "px_ui_item_bread";
+    case "coin":
+      return "px_item_coin";
+    default:
+      return "px_ui_slot_empty";
+  }
+}
+
 export function registerProceduralTextures(scene) {
   paint(scene, "px_player_self", PLAYER_SELF, P);
   paint(scene, "px_player_other", PLAYER_OTHER, P);
@@ -367,6 +542,13 @@ export function registerProceduralTextures(scene) {
   paint(scene, "px_enemy_demon", ENEMY_DEMON, P);
   paint(scene, "px_npc_shop", NPC_SHOP, P);
   paint(scene, "px_item_coin", ITEM_COIN, P);
+  paint(scene, "px_ui_item_sword", UI_ITEM_SWORD, P);
+  paint(scene, "px_ui_item_helm", UI_ITEM_HELM, P);
+  paint(scene, "px_ui_item_chest", UI_ITEM_CHEST, P);
+  paint(scene, "px_ui_item_boots", UI_ITEM_BOOTS, P);
+  paint(scene, "px_ui_item_potion", UI_ITEM_POTION, P);
+  paint(scene, "px_ui_item_bread", UI_ITEM_BREAD, P);
+  paint(scene, "px_ui_slot_empty", UI_SLOT_EMPTY, P);
   paint(scene, "px_tile_grass", TILE_GRASS, P);
   paint(scene, "px_tile_wall", TILE_WALL, P);
   paint(scene, "px_tile_portal", TILE_PORTAL, P);
