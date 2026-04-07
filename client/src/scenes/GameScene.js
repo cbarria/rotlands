@@ -85,12 +85,14 @@ function normalizeEquipInvIndex(v) {
 
 /** Slots currently worn (same basis as gold frame in bag / hotbar). */
 function wornInventorySlotSet(me) {
-  const eq = me?.inventory?.equipment || {};
+  const eq = me?.inventory?.equipment;
   /** @type {Set<number>} */
   const worn = new Set();
-  for (const k of ["weapon", "helmet", "chest", "boots"]) {
-    const ix = normalizeEquipInvIndex(eq[k]);
-    if (ix != null) worn.add(ix);
+  if (eq && typeof eq === "object") {
+    for (const v of Object.values(eq)) {
+      const ix = normalizeEquipInvIndex(v);
+      if (ix != null) worn.add(ix);
+    }
   }
   return worn;
 }
@@ -3455,11 +3457,11 @@ export class GameScene extends Phaser.Scene {
     const slots = inv?.slots || [];
     const eq = inv?.equipment || {};
     for (const kind of EQ_KINDS) {
-      const idx = eq[kind];
+      const idx = normalizeEquipInvIndex(eq[kind]);
       const icon = this._eqIconImages[kind];
       const nameT = this._eqNameTexts[kind];
       if (!nameT || !icon) continue;
-      const cell = Number.isInteger(idx) ? slots[idx] : null;
+      const cell = idx != null ? slots[idx] : null;
       if (cell && cell.qty > 0 && invTypeMatchesEquipKind(kind, cell.type)) {
         this.applyItemIconImage(icon, cell);
         nameT.setText(`${itemShortName(cell.type)} · bag #${(idx ?? 0) + 1}`);

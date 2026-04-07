@@ -51,7 +51,8 @@ export function normalizeEquipment(raw) {
  */
 export function clearEquipmentReferencingSlot(p, slotIndex) {
   const eq = p.equipment;
-  for (const k of /** @type {(keyof EquipmentSlots)[]} */ (["weapon", "helmet", "chest", "boots"])) {
+  if (!eq || typeof eq !== "object") return;
+  for (const k of Object.keys(eq)) {
     if (normalizeEquipSlotRef(eq[k]) === slotIndex) eq[k] = null;
   }
 }
@@ -62,9 +63,9 @@ export function clearEquipmentReferencingSlot(p, slotIndex) {
  */
 export function isInventorySlotEquipped(p, slotIndex) {
   const eq = p.equipment;
-  if (!eq || !Number.isInteger(slotIndex)) return false;
-  for (const k of /** @type {(keyof EquipmentSlots)[]} */ (["weapon", "helmet", "chest", "boots"])) {
-    if (normalizeEquipSlotRef(eq[k]) === slotIndex) return true;
+  if (!eq || typeof eq !== "object" || !Number.isInteger(slotIndex)) return false;
+  for (const v of Object.values(eq)) {
+    if (normalizeEquipSlotRef(v) === slotIndex) return true;
   }
   return false;
 }

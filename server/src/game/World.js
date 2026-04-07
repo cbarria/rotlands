@@ -1194,12 +1194,8 @@ export class World {
           weaponBonus: p.weaponBonus | 0,
           armorDefense: p.armorDefense | 0,
           maxHp: MAX_HP + (p.gearMaxHpBonus | 0),
-          equipment: {
-            weapon: p.equipment.weapon,
-            helmet: p.equipment.helmet,
-            chest: p.equipment.chest,
-            boots: p.equipment.boots,
-          },
+          // Always normalize so clients never see string indices / odd JSON shapes from DB.
+          equipment: normalizeEquipment(p.equipment),
         },
         gold: p.gold | 0,
       });
