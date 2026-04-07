@@ -58,16 +58,27 @@ export function clearEquipmentReferencingSlot(p, slotIndex) {
 }
 
 /**
+ * True if any equipment slot references this bag index (strict + normalized).
+ * Uses Object.keys so prototype pollution / odd shapes are still scanned.
+ * @param {any} eq
+ * @param {number} slotIndex
+ */
+export function inventorySlotHasEquippedRef(eq, slotIndex) {
+  if (!eq || typeof eq !== "object" || !Number.isInteger(slotIndex)) return false;
+  for (const k of Object.keys(eq)) {
+    const v = eq[k];
+    if (v === slotIndex) return true;
+    if (normalizeEquipSlotRef(v) === slotIndex) return true;
+  }
+  return false;
+}
+
+/**
  * @param {{ equipment: EquipmentSlots }} p
  * @param {number} slotIndex
  */
 export function isInventorySlotEquipped(p, slotIndex) {
-  const eq = p.equipment;
-  if (!eq || typeof eq !== "object" || !Number.isInteger(slotIndex)) return false;
-  for (const v of Object.values(eq)) {
-    if (normalizeEquipSlotRef(v) === slotIndex) return true;
-  }
-  return false;
+  return inventorySlotHasEquippedRef(p?.equipment, slotIndex);
 }
 
 /**

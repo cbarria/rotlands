@@ -1,7 +1,7 @@
 import { MAX_SLOTS, POTION_HEAL, addItemToSlots } from "./inventory.js";
 import {
   clearEquipmentReferencingSlot,
-  isInventorySlotEquipped,
+  inventorySlotHasEquippedRef,
   normalizeEquipment,
 } from "./equipment.js";
 import { iconHueFromMeta } from "./procedural/itemNames.js";
@@ -101,10 +101,9 @@ export function trySellSlot(p, slotIndex) {
   if (!p.equipment || typeof p.equipment !== "object") {
     p.equipment = normalizeEquipment(null);
   }
-  p.equipment = normalizeEquipment(p.equipment);
-  // Do not recalculateCombatStats here: it can clear eq.weapon/etc when validating
-  // cells, which would make isInventorySlotEquipped false and allow selling worn gear.
-  if (isInventorySlotEquipped(p, slotIndex)) return false;
+  // Never assign normalizeEquipment() before this check: stripping unknown ref shapes
+  // could clear a valid worn index and allow selling equipped gear.
+  if (inventorySlotHasEquippedRef(p.equipment, slotIndex)) return false;
   const s = p.slots[slotIndex];
   if (!s || s.qty < 1) return false;
   const unit = sellPriceForCell(s);
@@ -115,6 +114,7 @@ export function trySellSlot(p, slotIndex) {
     p.slots[slotIndex] = null;
     clearEquipmentReferencingSlot(p, slotIndex);
   }
+  p.equipment = normalizeEquipment(p.equipment);
   return true;
 }
 
