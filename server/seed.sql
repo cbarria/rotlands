@@ -1,0 +1,2 @@
+-- Optional demo row; players usually created on first join
+-- INSERT INTO characters (name, x, y, hp) VALUES ('npc_seed', 2, 2, 100) ON CONFLICT DO NOTHING;

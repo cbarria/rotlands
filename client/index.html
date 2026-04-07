@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover, user-scalable=no"
+    />
+    <title>Rotlands</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #111; overflow: hidden; }
+      #game { width: 100vw; height: 100vh; }
+    </style>
+  </head>
+  <body>
+    <div
+      id="boot-fallback"
+      style="
+        position: fixed;
+        inset: 0;
+        z-index: 2147483000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #111;
+        color: #ddd;
+        font-family: monospace;
+        font-size: 14px;
+        padding: 20px;
+        text-align: center;
+        box-sizing: border-box;
+      "
+    >
+      Cargando Rotlands…
+    </div>
+    <div id="game"></div>
+    <script type="module" src="/src/main.js"></script>
+    <script>
+      (function () {
+        function hookModuleLoader() {
+          const modules = [...document.querySelectorAll("script[type='module']")];
+          const entry =
+            modules.find((n) => {
+              const s = n.getAttribute("src") || "";
+              return /\/src\/main\./.test(s) || /\/assets\/index-/.test(s);
+            }) || modules[modules.length - 1];
+          if (!entry || entry.dataset.rotlandsErrhook) return;
+          entry.dataset.rotlandsErrhook = "1";
+          entry.addEventListener("error", function () {
+            const el = document.getElementById("boot-fallback");
+            if (el)
+              el.textContent =
+                "No se pudo cargar el juego (JS). Forzá recarga o probá otro navegador.";
+          });
+        }
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", hookModuleLoader);
+        } else {
+          hookModuleLoader();
+        }
+      })();
+    </script>
+  </body>
+</html>
