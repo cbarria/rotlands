@@ -1,6 +1,10 @@
 import Phaser from "phaser";
 import { io } from "socket.io-client";
-import { registerProceduralTextures, uiItemTextureKey } from "../art/proceduralPixels.js";
+import {
+  registerProceduralTextures,
+  uiItemTextureKey,
+  ensurePlayerAvatarTexture,
+} from "../art/proceduralPixels.js";
 
 const TILE = 32;
 /** Match server `server/src/game/shop.js` */
@@ -60,6 +64,43 @@ function isGearInvType(t) {
   );
 }
 
+/** Potions (etc.) should still fire interact when GEAR panel is open — gear slots only select for drag. */
+function isUsableInvTypeWhileGearOpen(t) {
+  return t === "potion";
+}
+
+/** Match server `normalizeEquipSlotRef` — inventory indices only. */
+const INV_MAX_SLOTS = 10;
+function normalizeEquipInvIndex(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "number" && Number.isInteger(v)) {
+    return v >= 0 && v < INV_MAX_SLOTS ? v : null;
+  }
+  if (typeof v === "string") {
+    const n = Number(v.trim());
+    if (Number.isInteger(n) && n >= 0 && n < INV_MAX_SLOTS) return n;
+  }
+  return null;
+}
+
+/** Slots currently worn (same basis as gold frame in bag / hotbar). */
+function wornInventorySlotSet(me) {
+  const eq = me?.inventory?.equipment || {};
+  /** @type {Set<number>} */
+  const worn = new Set();
+  for (const k of ["weapon", "helmet", "chest", "boots"]) {
+    const ix = normalizeEquipInvIndex(eq[k]);
+    if (ix != null) worn.add(ix);
+  }
+  return worn;
+}
+
+/** @param {any} me @param {number} slotIndex */
+function isInvSlotEquipped(me, slotIndex) {
+  if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= INV_MAX_SLOTS) return false;
+  return wornInventorySlotSet(me).has(slotIndex);
+}
+
 /** @param {string | undefined} type */
 function itemShortName(type) {
   const m = {
@@ -114,6 +155,8 @@ const HUD_DEPTH = 1400;
 const TOUCH_DEPTH = 2500;
 const SHOP_UI_DEPTH = 3100;
 const EQ_PANEL_DEPTH = 3040;
+const EQ_PICKER_DEPTH = 3250;
+const UI_TOOLTIP_DEPTH = 3350;
 const CHAT_DEPTH = 3050;
 const CHAT_MAX_LINES = 6;
 /** Same right inset as `createChatUi` chat panel. */
@@ -130,6 +173,10 @@ const T_TREE = 3;
 const T_ROCK = 4;
 const T_GRASS_PATCH = 5;
 const T_LAVA = 6;
+const T_WATER = 7;
+const T_SAND = 8;
+const T_SNOW = 9;
+const T_STONE = 10;
 
 /**
  * Guess ground under a tree/rock from orthogonal neighbors so the underlay matches nearby tiles.
@@ -141,6 +188,10 @@ function inferUnderlayTerrain(tiles, x, y, w, h) {
   let nPortal = 0;
   let nPatch = 0;
   let nLava = 0;
+  let nWater = 0;
+  let nSand = 0;
+  let nSnow = 0;
+  let nStone = 0;
   const dirs = [
     [-1, 0],
     [1, 0],
@@ -157,10 +208,18 @@ function inferUnderlayTerrain(tiles, x, y, w, h) {
     else if (n === T_PORTAL) nPortal++;
     else if (n === T_GRASS_PATCH) nPatch++;
     else if (n === T_LAVA) nLava++;
+    else if (n === T_WATER) nWater++;
+    else if (n === T_SAND) nSand++;
+    else if (n === T_SNOW) nSnow++;
+    else if (n === T_STONE) nStone++;
   }
   if (nLava >= 1) return T_LAVA;
+  if (nWater >= 1) return T_WATER;
   if (nPatch >= 1) return T_GRASS_PATCH;
   if (nPortal >= 1) return T_PORTAL;
+  if (nSnow >= 1) return T_SNOW;
+  if (nSand >= 1) return T_SAND;
+  if (nStone >= 2 || (nStone >= 1 && nGrass + nPatch + nSand === 0)) return T_STONE;
   if (nWall >= 2 || (nWall >= 1 && nGrass + nPatch === 0)) return T_WALL;
   return T_GRASS;
 }
@@ -176,6 +235,14 @@ function textureForTerrainTile(t) {
       return "px_tile_grass_patch";
     case T_LAVA:
       return "px_tile_lava";
+    case T_WATER:
+      return "px_tile_water";
+    case T_SAND:
+      return "px_tile_sand";
+    case T_SNOW:
+      return "px_tile_snow";
+    case T_STONE:
+      return "px_tile_stone";
     default:
       return "px_tile_grass";
   }
@@ -198,6 +265,8 @@ export class GameScene extends Phaser.Scene {
     this.selfDbId = null;
     /** @type {string | null} */
     this.currentMapId = null;
+    /** @type {Map<string, string>} portal cell "x,y" → "red"|"blue"|"" */
+    this._portalKinds = new Map();
     this.sprites = new Map();
     this.mapData = null;
     /** Dark red “missing HP” track behind the green fill */
@@ -218,6 +287,8 @@ export class GameScene extends Phaser.Scene {
     /** @type {Phaser.GameObjects.Text | null} */
     this._hudZoneText = null;
     /** @type {Phaser.GameObjects.Text | null} */
+    this._hudPartyText = null;
+    /** @type {Phaser.GameObjects.Text | null} */
     this._hudHintText = null;
     /** @type {Phaser.GameObjects.Rectangle[]} */
     this._invSlotBgs = [];
@@ -231,6 +302,18 @@ export class GameScene extends Phaser.Scene {
     this._invSlotHotkeys = [];
     /** @type {Phaser.GameObjects.Zone[]} */
     this._invSlotZones = [];
+    /** Bottom hotbar — always visible; mirrors bag (1–0). */
+    this._quickBarBuilt = false;
+    /** @type {Phaser.GameObjects.Rectangle[]} */
+    this._quickBarBgs = [];
+    /** @type {Phaser.GameObjects.Image[]} */
+    this._quickBarIcons = [];
+    /** @type {Phaser.GameObjects.Text[]} */
+    this._quickBarQty = [];
+    /** @type {Phaser.GameObjects.Text[]} */
+    this._quickBarHotkeys = [];
+    /** @type {Phaser.GameObjects.Zone[]} */
+    this._quickBarZones = [];
     /** @type {number} */
     this.selectedSlotIndex = 0;
     /** @type {Phaser.GameObjects.Image[]} */
@@ -263,8 +346,29 @@ export class GameScene extends Phaser.Scene {
     this._eqIconImages = {};
     /** @type {Record<string, Phaser.GameObjects.Text>} */
     this._eqNameTexts = {};
-    /** @type {Record<string, Phaser.GameObjects.Text>} */
-    this._eqStatTexts = {};
+    /** @type {Record<string, Phaser.GameObjects.Zone>} */
+    this._eqIconHitZones = {};
+    /** @type {null | string} */
+    this._eqPickKind = null;
+    /** “Choose from bag” sub-panel */
+    this._eqPickerOpen = false;
+    this._eqPickerBuilt = false;
+    /** @type {Phaser.GameObjects.GameObject[]} */
+    this._eqPickerNodes = [];
+    /** @type {Phaser.GameObjects.Text | null} */
+    this._eqPickerTitle = null;
+    /** @type {Phaser.GameObjects.Text | null} */
+    this._eqPickerEmptyHint = null;
+    /** @type {{ invIndex: null | number, bg: Phaser.GameObjects.Rectangle, icon: Phaser.GameObjects.Image, cap: Phaser.GameObjects.Text, zone: Phaser.GameObjects.Zone }[]} */
+    this._eqPickerCells = [];
+    /** Hover tooltip (icon + stats) */
+    /** @type {Phaser.GameObjects.Rectangle | null} */
+    this._ttBg = null;
+    /** @type {Phaser.GameObjects.Image | null} */
+    this._ttIcon = null;
+    /** @type {Phaser.GameObjects.Text | null} */
+    this._ttText = null;
+    this._ttVisible = false;
     /** @type {(() => void) | null} */
     this._eqGlobalPointerUp = null;
     /** @type {"main" | "buy" | "sell"} */
@@ -312,6 +416,11 @@ export class GameScene extends Phaser.Scene {
     /** Visible until map + entities sync (debug “black screen” without console errors). */
     /** @type {Phaser.GameObjects.Text | null} */
     this._loadHintText = null;
+    /** Ephemeral toast (inventory full, etc.) — not the same as fatal `showNetError`. */
+    /** @type {Phaser.GameObjects.Text | null} */
+    this._transientNoticeText = null;
+    /** @type {Phaser.Time.TimerEvent | null} */
+    this._transientNoticeTimer = null;
   }
 
   /** Split world vs UI so map sprites are never occluded by HUD strips. */
@@ -441,6 +550,7 @@ export class GameScene extends Phaser.Scene {
 
     this.createRightGutterBackdrop();
     this.createRpgHud();
+    this.createQuickSlotBar();
     this.createInventoryPanel();
     this.createChatUi();
     this.createEquipmentPanel();
@@ -455,6 +565,7 @@ export class GameScene extends Phaser.Scene {
     this._netStatusText = null;
 
     const showNetError = (line1, line2 = "") => {
+      hideTransientNotice();
       if (!this._netStatusText) {
         this._netStatusText = this.add
           .text(GAME_W / 2, GAME_H / 2, "", {
@@ -482,6 +593,41 @@ export class GameScene extends Phaser.Scene {
       }
     };
 
+    const hideTransientNotice = () => {
+      if (this._transientNoticeTimer) {
+        this._transientNoticeTimer.remove(false);
+        this._transientNoticeTimer = null;
+      }
+      if (this._transientNoticeText) {
+        this._transientNoticeText.destroy();
+        this._transientNoticeText = null;
+        this._syncCameraLayers();
+      }
+    };
+
+    const showTransientNotice = (title, detail = "") => {
+      hideTransientNotice();
+      this._transientNoticeText = this.add
+        .text(GAME_W / 2, GAME_H - 86, "", {
+          fontSize: "12px",
+          color: "#ffe8d8",
+          fontFamily: "monospace",
+          align: "center",
+          wordWrap: { width: Math.min(PLAYFIELD_W, GAME_W) - 40 },
+          backgroundColor: "#1a1210f0",
+          padding: { x: 14, y: 10 },
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(11050);
+      this._syncCameraLayers();
+      this._transientNoticeText.setText([title, detail].filter(Boolean).join("\n"));
+      this._transientNoticeTimer = this.time.delayedCall(5200, () => {
+        this._transientNoticeTimer = null;
+        hideTransientNotice();
+      });
+    };
+
     const name = `hero_${(Math.random() * 10000) | 0}`;
 
     this._updateLoadHint("Conectando al servidor…");
@@ -489,6 +635,7 @@ export class GameScene extends Phaser.Scene {
     this.socket.on("connect", () => {
       this._socketEverConnected = true;
       clearNetError();
+      hideTransientNotice();
       this._updateLoadHint("Conectado — registrando personaje…");
       this.socket.emit("join", { name }, (ack) => {
         if (ack && ack.ok === false) {
@@ -536,7 +683,10 @@ export class GameScene extends Phaser.Scene {
       this.selfId = msg.selfId;
       this.selfDbId = msg.dbId ?? null;
       if (msg.mapId) this.currentMapId = msg.mapId;
-      this.pushChatLine("Game", "Enter: chat · Space: attack (next to enemy in dungeon).");
+      this.pushChatLine(
+        "Game",
+        "Enter: chat · /invite Name · /paccept Name · /pleave · Space: attack (near foes).",
+      );
     });
 
     this.socket.on("mapTransition", (snap) => this.runMapTransition(snap));
@@ -546,9 +696,45 @@ export class GameScene extends Phaser.Scene {
       if (msg?.name != null && msg?.text != null) this.pushChatLine(msg.name, msg.text);
     });
 
+    this.socket.on("party_invited", (msg) => {
+      const from = String(msg?.from || "?");
+      this.pushChatLine("Party", `${from} invited you — type /paccept ${from}`);
+    });
+
+    this.socket.on("party_notice", (msg) => {
+      const code = String(msg?.message || "");
+      const human =
+        code === "invite_sent"
+          ? "Invite sent."
+          : code === "joined_party"
+            ? "You joined the party."
+            : code === "left_party"
+              ? "You left the party."
+              : code === "party_accept_failed"
+                ? "Could not join (wrong name, full party, or different party)."
+                : code === "player_not_found"
+                  ? "No player with that name (exact match, online)."
+                  : code.replace(/_/g, " ");
+      this.pushChatLine("Party", human);
+    });
+
     this.socket.on("error_msg", (payload) => {
-      const m = String(payload?.message || "join_failed");
-      showNetError("Error al entrar al juego (join).", m);
+      const code = String(payload?.message || "join_failed");
+      if (code === "inventory_full") {
+        showTransientNotice(
+          "Inventario lleno",
+          "No hay espacio para recoger. Usa 1–0 o Tab para gastar una poción u otro objeto, o libera un hueco.",
+        );
+        return;
+      }
+      if (code === "join_failed") {
+        showNetError(
+          "Error al entrar al juego (join).",
+          "Fallo del servidor o base de datos. Revisá Docker y GET /ready en el host.",
+        );
+        return;
+      }
+      showTransientNotice("Aviso", code.replace(/_/g, " "));
     });
 
     this.cursors = this.input.keyboard.createCursorKeys();
@@ -586,6 +772,14 @@ export class GameScene extends Phaser.Scene {
       if (this._eqGlobalPointerUp) this.input?.off("pointerup", this._eqGlobalPointerUp);
       this._eqGlobalPointerUp = null;
       this.scale?.off("resize", this._syncChatInputDomLayout, this);
+      if (this._transientNoticeTimer) {
+        this._transientNoticeTimer.remove(false);
+        this._transientNoticeTimer = null;
+      }
+      if (this._transientNoticeText) {
+        this._transientNoticeText.destroy();
+        this._transientNoticeText = null;
+      }
       if (this._joinWatchPending) {
         this._joinWatchPending.remove(false);
         this._joinWatchPending = null;
@@ -744,7 +938,7 @@ export class GameScene extends Phaser.Scene {
     el.type = "text";
     el.autocomplete = "off";
     el.maxLength = 200;
-    el.placeholder = "Message · Enter send · Esc cancel";
+    el.placeholder = "Chat, or /invite Name, /paccept Name, /pleave";
     Object.assign(el.style, {
       zIndex: "99999",
       display: "none",
@@ -767,7 +961,20 @@ export class GameScene extends Phaser.Scene {
       if (e.key === "Enter") {
         e.preventDefault();
         const t = el.value.trim();
-        if (t && this.socket?.connected) this.socket.emit("chat", { text: t });
+        if (t && this.socket?.connected) {
+          const low = t.toLowerCase();
+          if (low.startsWith("/invite ")) {
+            const targetName = t.slice("/invite ".length).trim();
+            if (targetName) this.socket.emit("party_invite", { targetName });
+          } else if (low.startsWith("/paccept ")) {
+            const inviterName = t.slice("/paccept ".length).trim();
+            if (inviterName) this.socket.emit("party_accept", { inviterName });
+          } else if (low === "/pleave") {
+            this.socket.emit("party_leave", {});
+          } else {
+            this.socket.emit("chat", { text: t });
+          }
+        }
         el.value = "";
         el.style.display = "none";
         this._chatInputOpen = false;
@@ -914,6 +1121,19 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(d + 3);
 
+    this._hudPartyText = this.add
+      .text(PLAYFIELD_W + 12, 30, "", {
+        fontSize: "11px",
+        color: "#c8ffd8",
+        fontFamily: "monospace",
+        stroke: "#081008",
+        strokeThickness: 3,
+        wordWrap: { width: CHAT_GUTTER_W - 20 },
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(d + 3);
+
     this._hudHintText = this.add
       .text(statBoxX + statPadX, statBoxY + statPadY + 22, "", {
         fontSize: "11px",
@@ -927,6 +1147,91 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0, 0)
       .setScrollFactor(0)
       .setDepth(d + 3);
+  }
+
+  /** Thin 1–0 strip above the bottom edge (Tab still opens full ITEMS). */
+  createQuickSlotBar() {
+    if (this._quickBarBuilt) return;
+    this._quickBarBuilt = true;
+    const d = HUD_DEPTH + 35;
+    const slotSize = 30;
+    const gap = 4;
+    const n = 10;
+    const gridW = n * slotSize + (n - 1) * gap;
+    const baseX = PLAYFIELD_W / 2 - gridW / 2;
+    const baseY = GAME_H - 24;
+    const ZInner = 0xd4c4a8;
+
+    for (let i = 0; i < n; i++) {
+      const sx = baseX + i * (slotSize + gap) + slotSize / 2;
+      const sy = baseY;
+      const bg = this.add
+        .rectangle(sx, sy, slotSize + 1, slotSize + 1, ZInner, 1)
+        .setStrokeStyle(2, 0x3d6c48)
+        .setScrollFactor(0)
+        .setDepth(d);
+      const icon = this.add
+        .image(sx, sy, "px_ui_slot_empty")
+        .setScrollFactor(0)
+        .setDepth(d + 1)
+        .setDisplaySize(24, 24);
+      const lab = i === 9 ? "0" : String(i + 1);
+      const hotkey = this.add
+        .text(sx - slotSize / 2 + 3, sy - slotSize / 2 + 2, lab, {
+          fontSize: "8px",
+          color: "#6a5850",
+          fontFamily: "monospace",
+        })
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(d + 2);
+      const qty = this.add
+        .text(sx + slotSize / 2 - 2, sy + slotSize / 2 - 2, "", {
+          fontSize: "8px",
+          color: "#6b1818",
+          fontFamily: "monospace",
+        })
+        .setOrigin(1, 1)
+        .setScrollFactor(0)
+        .setDepth(d + 2);
+      this._quickBarBgs.push(bg);
+      this._quickBarIcons.push(icon);
+      this._quickBarHotkeys.push(hotkey);
+      this._quickBarQty.push(qty);
+
+      let armed = false;
+      const z = this.add
+        .zone(sx, sy, slotSize + 6, slotSize + 8)
+        .setScrollFactor(0)
+        .setDepth(d + 5)
+        .setInteractive({ useHandCursor: true });
+      this._quickBarZones.push(z);
+      z.on("pointerdown", (p) => {
+        p.event?.preventDefault?.();
+        armed = true;
+        if (this._equipmentPanelOpen) {
+          const me = this._selfEntity();
+          const cell = me?.inventory?.slots?.[i];
+          if (cell && isGearInvType(cell.type)) this._eqDragInvIndex = i;
+        }
+      });
+      z.on("pointerup", () => {
+        if (!armed) return;
+        armed = false;
+        this.onInventorySlotInput(i);
+      });
+      z.on("pointerout", () => {
+        armed = false;
+        this.hideItemTooltip();
+      });
+      z.on("pointerover", () => {
+        const me = this._selfEntity();
+        const s = me?.inventory?.slots?.[i];
+        const p = this.input.activePointer;
+        this.showItemTooltipForCell(s && s.qty >= 1 ? s : null, p.x, p.y);
+      });
+    }
+    this._syncCameraLayers();
   }
 
   /**
@@ -1096,6 +1401,13 @@ export class GameScene extends Phaser.Scene {
       });
       z.on("pointerout", () => {
         armed = false;
+        this.hideItemTooltip();
+      });
+      z.on("pointerover", () => {
+        const me = this._selfEntity();
+        const s = me?.inventory?.slots?.[i];
+        const p = this.input.activePointer;
+        this.showItemTooltipForCell(s && s.qty >= 1 ? s : null, p.x, p.y);
       });
     }
 
@@ -1126,29 +1438,26 @@ export class GameScene extends Phaser.Scene {
 
   updateSelectionHighlight() {
     const me = this._selfEntity();
-    const eq = me?.inventory?.equipment || {};
-    /** @type {Set<number>} */
-    const worn = new Set();
-    for (const k of ["weapon", "helmet", "chest", "boots"]) {
-      const ix = eq[k];
-      if (Number.isInteger(ix)) worn.add(ix);
-    }
+    const worn = wornInventorySlotSet(me);
     const ZInner = 0xd4c4a8;
     for (let i = 0; i < 10; i++) {
-      const bg = this._invSlotBgs[i];
-      if (!bg) continue;
       const sel = i === this.selectedSlotIndex;
       const onBody = worn.has(i);
-      if (sel) {
-        bg.setStrokeStyle(4, 0xf0c84a, 1);
-        bg.setFillStyle(0xf0e8d8, 1);
-      } else if (onBody) {
-        bg.setStrokeStyle(3, 0xc9a227, 1);
-        bg.setFillStyle(0xe4d8b8, 1);
-      } else {
-        bg.setStrokeStyle(2, 0x3d6c48, 1);
-        bg.setFillStyle(ZInner, 1);
-      }
+      const pick = (/** @type {Phaser.GameObjects.Rectangle | undefined} */ bg) => {
+        if (!bg) return;
+        if (sel) {
+          bg.setStrokeStyle(4, 0xf0c84a, 1);
+          bg.setFillStyle(0xf0e8d8, 1);
+        } else if (onBody) {
+          bg.setStrokeStyle(3, 0xc9a227, 1);
+          bg.setFillStyle(0xe4d8b8, 1);
+        } else {
+          bg.setStrokeStyle(2, 0x3d6c48, 1);
+          bg.setFillStyle(ZInner, 1);
+        }
+      };
+      pick(this._invSlotBgs[i]);
+      pick(this._quickBarBgs[i]);
     }
   }
 
@@ -1162,8 +1471,14 @@ export class GameScene extends Phaser.Scene {
     this.updateSelectionHighlight();
     if (!this.socket) return;
     if (this._equipmentPanelOpen) {
-      this.refreshEquipmentPanel();
-      return;
+      const me = this._selfEntity();
+      const cell = me?.inventory?.slots?.[i];
+      const useAnyway =
+        cell && cell.qty >= 1 && isUsableInvTypeWhileGearOpen(cell.type);
+      if (!useAnyway) {
+        this.refreshEquipmentPanel();
+        return;
+      }
     }
     if (this._inventoryPanelOpen && fromKeyboard) return;
     this.socket.emit("interactSlot", { slot: i });
@@ -1184,7 +1499,12 @@ export class GameScene extends Phaser.Scene {
     img.setAlpha(1);
     img.setTexture(uiItemTextureKey(s.type));
     const r = s.meta?.rarity;
-    if (s.type === "weapon" || s.type === "potion") {
+    const ih = s.meta?.iconHue;
+    const gearT = ["weapon", "armor_helmet", "armor_chest", "armor_boots"];
+    if (gearT.includes(String(s.type)) && ih != null && Number.isFinite(Number(ih))) {
+      const c = Phaser.Display.Color.HSVToRGB(Phaser.Math.Clamp(Number(ih) / 360, 0, 1), 0.58, 0.94);
+      img.setTint(c.color);
+    } else if (s.type === "weapon" || s.type === "potion") {
       if (r === "rare") img.setTint(0x9cd3ff);
       else if (r === "epic") img.setTint(0xffe08a);
     }
@@ -1215,12 +1535,25 @@ export class GameScene extends Phaser.Scene {
     if (this._hudAtkText) this._hudAtkText.setText(`+${wb} ATK`);
     if (this._hudDefText) this._hudDefText.setText(`+${defv} DEF`);
 
-    const zl = snap.zoneLabel || (snap.combatAllowed ? "Wild" : "Town");
+    let zl = snap.zoneLabel || (snap.combatAllowed ? "Wild" : "Town");
+    if (snap.biome) zl = `${zl} · ${snap.biome}`;
     if (this._hudZoneText) this._hudZoneText.setText(String(zl).toUpperCase());
 
+    if (this._hudPartyText) {
+      const pid = me?.partyId;
+      if (!pid) this._hudPartyText.setText("");
+      else {
+        const mates = (snap.entities || []).filter(
+          (e) => e.kind === "player" && e.partyId === pid,
+        );
+        const names = mates.map((p) => this.shortName(p.name, 7)).join(", ");
+        this._hudPartyText.setText(names ? `Party: ${names}` : "Party");
+      }
+    }
+
     let hint = "";
-    if (snap.combatAllowed) hint = "Move · Space atk · E loot · Tab items · I gear";
-    else hint = "Move · E loot · Tab items · I gear";
+    if (snap.combatAllowed) hint = "Move · Space atk · E loot · 1–0 quick · Tab bag · I gear";
+    else hint = "Move · E loot · 1–0 quick · Tab bag · I gear";
     if (this.isAdjacentToShopkeeper(snap, me)) {
       hint += " · Shop E/F · menu: ↑↓ Enter · Esc";
     }
@@ -1236,6 +1569,10 @@ export class GameScene extends Phaser.Scene {
       if (icon) this.applyItemIconImage(icon, s);
       if (cap) cap.setText(s && s.qty >= 1 ? itemShortName(s.type) : "");
       if (qty) qty.setText(s && s.qty > 1 ? `${s.qty}` : "");
+      const qbIcon = this._quickBarIcons[i];
+      const qbQty = this._quickBarQty[i];
+      if (qbIcon) this.applyItemIconImage(qbIcon, s);
+      if (qbQty) qbQty.setText(s && s.qty > 1 ? `${s.qty}` : "");
     }
     this.updateSelectionHighlight();
     if (this._equipmentPanelOpen) this.refreshEquipmentPanel();
@@ -1350,7 +1687,7 @@ export class GameScene extends Phaser.Scene {
     img.setPosition(TILE / 2, TILE / 2);
     img.setScale(1);
     img.setAlpha(1);
-    img.setTint(0xffffff);
+    img.clearTint();
 
     this.tweens.add({
       targets: cont,
@@ -1366,11 +1703,13 @@ export class GameScene extends Phaser.Scene {
       targets: img,
       scaleX: { from: 1, to: 1.12 },
       scaleY: { from: 1, to: 1.12 },
+      angle: { from: -11, to: 16 },
       duration: 48,
       ease: "Quad.easeOut",
       yoyo: true,
       onComplete: () => {
         img.setScale(1);
+        img.setAngle(0);
         img.clearTint();
         img.setAlpha(1);
       },
@@ -1563,7 +1902,12 @@ export class GameScene extends Phaser.Scene {
           overIm.setDepth(-199);
           this._tileImgs.push(overIm);
         } else {
-          const tex = textureForTerrainTile(v);
+          let tex = textureForTerrainTile(v);
+          if (v === T_PORTAL) {
+            const pk = this._portalKinds.get(`${x},${y}`) || "";
+            if (pk === "blue") tex = "px_tile_portal_blue";
+            else if (pk === "red") tex = "px_tile_portal_red";
+          }
           const im = this.add.image(cx, cy, tex);
           im.setDisplaySize(TILE, TILE);
           im.setDepth(-200);
@@ -1575,12 +1919,13 @@ export class GameScene extends Phaser.Scene {
 
   textureKeyFor(ent) {
     if (ent.kind === "player") {
-      return ent.id === this.selfId ? "px_player_self" : "px_player_other";
+      return ensurePlayerAvatarTexture(this, ent);
     }
     if (ent.kind === "npc") {
       return "px_npc_shop";
     }
     if (ent.kind === "enemy") {
+      if (ent.procName) return "px_enemy_proc";
       switch (ent.enemyType) {
         case "slime":
           return "px_enemy_slime";
@@ -1630,6 +1975,11 @@ export class GameScene extends Phaser.Scene {
     if (prevMap != null && snap.mapId !== prevMap) {
       this._chatLines = [];
       if (this._chatLogText) this._chatLogText.setText("");
+    }
+    this._portalKinds = new Map();
+    for (const po of snap.portals || []) {
+      const k = po?.kind != null ? String(po.kind) : "";
+      this._portalKinds.set(`${po.x},${po.y}`, k);
     }
     this.mapData = snap.map;
     this.renderTiles();
@@ -1706,7 +2056,16 @@ export class GameScene extends Phaser.Scene {
       hpFill = this.add
         .rectangle(bx - bw / 2 + 1, by, bw - 2, bh - 2, 0x43a047, 1)
         .setOrigin(0, 0.5);
-      cont.add([hpBg, hpFill, img, label]);
+      let partyRing = null;
+      if (ent.kind === "player") {
+        partyRing = this.add
+          .rectangle(bx, TILE / 2 + 1, 30, 28, 0x000000, 0)
+          .setStrokeStyle(2, 0xffffff, 0);
+        partyRing.setVisible(false);
+      }
+      const stack = partyRing ? [partyRing, hpBg, hpFill, img, label] : [hpBg, hpFill, img, label];
+      cont.add(stack);
+      if (partyRing) cont.setData("partyRing", partyRing);
       cont.setData("hpBg", hpBg);
       cont.setData("hpFill", hpFill);
     } else {
@@ -1807,7 +2166,7 @@ export class GameScene extends Phaser.Scene {
 
     const vfxLock = img.getData("vfxLock");
     if (!vfxLock) {
-      img.setPosition(TILE / 2, TILE / 2);
+      img.setX(TILE / 2);
       img.setScale(1);
       if (ent.kind === "player" || ent.kind === "enemy") cont.setScale(1);
     }
@@ -1816,9 +2175,28 @@ export class GameScene extends Phaser.Scene {
 
     if (ent.kind === "player") {
       cont.setDepth(30);
+      const ring = cont.getData("partyRing");
+      if (ring) {
+        const me = this._selfEntity();
+        const show = Boolean(me?.partyId && ent.partyId && ent.partyId === me.partyId);
+        ring.setVisible(show);
+        if (show) {
+          const ph = Number(ent.partyHue ?? 0);
+          const col = Phaser.Display.Color.HSVToRGB(Phaser.Math.Clamp(ph / 360, 0, 1), 0.72, 0.94);
+          ring.setStrokeStyle(2, col.color, 0.9);
+        }
+      }
       if (!vfxLock) {
         img.setAlpha(1);
-        img.setTint(0xffffff);
+        img.clearTint();
+        const t = this.time.now;
+        const prev = cont.getData("_prevGx");
+        const gx = ent.x;
+        const gy = ent.y;
+        const moved = prev != null && (prev.x !== gx || prev.y !== gy);
+        cont.setData("_prevGx", { x: gx, y: gy });
+        const bob = moved ? Math.sin(t / 95) * 1.35 : Math.sin(t / 520) * 0.45;
+        img.setY(TILE / 2 + bob);
       }
       label.setText(this.shortName(ent.name, 8));
     } else if (ent.kind === "npc") {
@@ -1832,26 +2210,45 @@ export class GameScene extends Phaser.Scene {
       if (cont.getData("dying")) return;
       cont.setDepth(20);
       const dead = ent.hp <= 0;
+      const sc = ent.tier === "boss" ? 1.14 : ent.tier === "elite" ? 1.08 : 1;
+      if (!vfxLock) cont.setScale(sc);
       if (!vfxLock) {
+        img.setY(TILE / 2 + (dead ? 0 : Math.sin(this.time.now / 440) * 0.35));
         img.setAlpha(dead ? 0.35 : 1);
-        img.setTint(dead ? 0x888888 : 0xffffff);
+        if (ent.procName && !dead) {
+          const pal = Number(ent.paletteId ?? 0);
+          const te = ent.tier === "boss" ? 0.82 : ent.tier === "elite" ? 0.78 : 0.72;
+          const hu = Phaser.Math.Clamp(((pal * 47) % 360) / 360, 0, 1);
+          const col = Phaser.Display.Color.HSVToRGB(hu, 0.55, te);
+          img.setTint(col.color);
+        } else {
+          img.setTint(dead ? 0x888888 : 0xffffff);
+        }
       }
       label.setText(
-        ent.enemyType === "slime"
-          ? "slime"
-          : ent.enemyType === "skeleton"
-            ? "skel"
-            : ent.enemyType === "zombie"
-              ? "zombie"
-              : ent.enemyType === "demon"
-                ? "demon"
-                : "foe",
+        ent.procName
+          ? this.shortName(ent.procName, 9)
+          : ent.enemyType === "slime"
+            ? "slime"
+            : ent.enemyType === "skeleton"
+              ? "skel"
+              : ent.enemyType === "zombie"
+                ? "zombie"
+                : ent.enemyType === "demon"
+                  ? "demon"
+                  : "foe",
       );
     } else if (ent.kind === "item") {
       cont.setDepth(10);
       img.setAlpha(1);
+      img.clearTint();
       const rarity = ent.meta?.rarity;
-      if (ent.itemType === "bread") {
+      const gih = ent.meta?.iconHue;
+      const isGear = ["weapon", "armor_helmet", "armor_chest", "armor_boots"].includes(String(ent.itemType));
+      if (isGear && gih != null && Number.isFinite(Number(gih))) {
+        const gc = Phaser.Display.Color.HSVToRGB(Phaser.Math.Clamp(Number(gih) / 360, 0, 1), 0.56, 0.93);
+        img.setTint(gc.color);
+      } else if (ent.itemType === "bread") {
         img.setTint(0xd49a5c);
       } else if (ent.itemType === "potion") {
         img.setTint(rarity === "epic" ? 0xcc88ff : rarity === "rare" ? 0x55dd99 : 0x44cc77);
@@ -1863,8 +2260,6 @@ export class GameScene extends Phaser.Scene {
         img.setTint(0x9888bb);
       } else if (ent.itemType === "armor_boots") {
         img.setTint(0x8899aa);
-      } else {
-        img.clearTint();
       }
       let short = ent.itemType || "";
       if (short === "armor_helmet") short = "helm";
@@ -1887,10 +2282,12 @@ export class GameScene extends Phaser.Scene {
    */
   collectSellableSlots(me) {
     const slots = me?.inventory?.slots || [];
+    const worn = wornInventorySlotSet(me);
     const out = [];
     for (let i = 0; i < slots.length; i++) {
       const s = slots[i];
       if (!s || s.qty < 1) continue;
+      if (worn.has(i)) continue;
       if (shopSellUnitGold(s) > 0) out.push(i);
     }
     return out;
@@ -1910,7 +2307,7 @@ export class GameScene extends Phaser.Scene {
       const slotIdxs = this.collectSellableSlots(me);
       this._shopSellSlotIndices = slotIdxs;
       if (slotIdxs.length === 0) {
-        labels.push("(nothing to sell)", "Back");
+        labels.push("(nothing to sell — unequip in GEAR first)", "Back");
       } else {
         for (const si of slotIdxs) {
           const s = me.inventory.slots[si];
@@ -1987,8 +2384,10 @@ export class GameScene extends Phaser.Scene {
       this.refreshShopMenuLayout();
       return;
     }
-    const slots = this._shopSellSlotIndices;
-    if (slots.length === 0) {
+    const meSell = this._selfEntity();
+    const liveSell = this.collectSellableSlots(meSell);
+    this._shopSellSlotIndices = liveSell;
+    if (liveSell.length === 0) {
       if (idx === 1) {
         this._shopPanelMode = "main";
         this._shopMenuIndex = 0;
@@ -1996,8 +2395,13 @@ export class GameScene extends Phaser.Scene {
       this.refreshShopMenuLayout();
       return;
     }
-    if (idx < slots.length) {
-      this.socket.emit("shop", { action: "sell", slot: slots[idx] });
+    if (idx < liveSell.length) {
+      const slot = liveSell[idx];
+      if (meSell && isInvSlotEquipped(meSell, slot)) {
+        this.refreshShopMenuLayout();
+        return;
+      }
+      this.socket.emit("shop", { action: "sell", slot });
     } else {
       this._shopPanelMode = "main";
       this._shopMenuIndex = 0;
@@ -2321,7 +2725,8 @@ export class GameScene extends Phaser.Scene {
         this._chatInputEl.blur();
         this._chatEnterSuppressUntil = performance.now() + 200;
       } else if (this._equipmentPanelOpen) {
-        this.closeEquipmentPanel();
+        if (this._eqPickerOpen) this.closeEquipPicker();
+        else this.closeEquipmentPanel();
       } else if (this._inventoryPanelOpen) {
         this.closeInventoryPanel();
       } else if (this._shopPopupOpen) {
@@ -2453,6 +2858,315 @@ export class GameScene extends Phaser.Scene {
         }
       }
     }
+
+    if (this._ttVisible && this._ttBg?.visible) {
+      const p = this.input.activePointer;
+      this.layoutItemTooltip(p.x, p.y);
+    }
+  }
+
+  ensureItemTooltip() {
+    if (this._ttBg) return;
+    const d = UI_TOOLTIP_DEPTH;
+    this._ttBg = this.add
+      .rectangle(0, 0, 160, 72, 0xf8ecd8, 0.97)
+      .setStrokeStyle(2, 0x1a4a22)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(d)
+      .setVisible(false);
+    this._ttIcon = this.add
+      .image(0, 0, "px_ui_slot_empty")
+      .setScrollFactor(0)
+      .setDepth(d + 1)
+      .setDisplaySize(36, 36)
+      .setVisible(false);
+    this._ttText = this.add
+      .text(0, 0, "", {
+        fontSize: "11px",
+        color: "#1a1810",
+        fontFamily: "monospace",
+        lineSpacing: 2,
+        wordWrap: { width: 200 },
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(d + 1)
+      .setVisible(false);
+  }
+
+  /** @param {number} px @param {number} py screen coords */
+  layoutItemTooltip(px, py) {
+    if (!this._ttBg || !this._ttVisible) return;
+    const pad = 12;
+    const tw = this._ttBg.width;
+    const th = this._ttBg.height;
+    let tx = px + pad;
+    let ty = py + pad;
+    if (tx + tw > GAME_W - 6) tx = Math.max(6, px - tw - pad);
+    if (ty + th > GAME_H - 6) ty = Math.max(6, py - th - pad);
+    this._ttBg.setPosition(tx, ty);
+    this._ttIcon.setPosition(tx + 6, ty + 6);
+    this._ttText.setPosition(tx + 48, ty + 8);
+  }
+
+  /**
+   * @param {null | { type?: string, qty?: number, meta?: any }} cell
+   * @param {number} [px]
+   * @param {number} [py]
+   */
+  showItemTooltipForCell(cell, px, py) {
+    this.ensureItemTooltip();
+    if (!cell || (cell.qty ?? 0) < 1) {
+      this.hideItemTooltip();
+      return;
+    }
+    this.applyItemIconImage(this._ttIcon, cell);
+    const dn = cell.meta?.displayName;
+    const nm = dn ? String(dn) : itemShortName(cell.type);
+    const st = formatGearStatsReadable(cell.meta);
+    const q = (cell.qty ?? 1) > 1 ? `Qty ${cell.qty}` : "";
+    this._ttText.setText([nm, st || "—", q].filter(Boolean).join("\n"));
+    const tw = Math.min(GAME_W - 24, Math.max(120, this._ttText.width + 56));
+    const th = Math.max(50, this._ttText.height + 16);
+    this._ttBg.setSize(tw, th);
+    this._ttBg.setVisible(true);
+    this._ttIcon.setVisible(true);
+    this._ttText.setVisible(true);
+    this._ttVisible = true;
+    const p = this.input.activePointer;
+    this.layoutItemTooltip(px ?? p.x, py ?? p.y);
+  }
+
+  hideItemTooltip() {
+    this._ttVisible = false;
+    if (this._ttBg) this._ttBg.setVisible(false);
+    if (this._ttIcon) this._ttIcon.setVisible(false);
+    if (this._ttText) this._ttText.setVisible(false);
+  }
+
+  buildEquipPicker() {
+    if (this._eqPickerBuilt) return;
+    this._eqPickerBuilt = true;
+    const d = EQ_PICKER_DEPTH;
+    const push = (o) => {
+      this._eqPickerNodes.push(o);
+      return o;
+    };
+    const ZFrame = 0x1a4a22;
+    const ZCream = 0xe8dcc4;
+
+    const drop = this.add
+      .rectangle(GAME_W / 2, GAME_H / 2, GAME_W + 8, GAME_H + 8, 0x000000, 0.35)
+      .setScrollFactor(0)
+      .setDepth(d)
+      .setInteractive();
+    push(drop);
+    drop.on("pointerup", () => this.closeEquipPicker());
+
+    const pw = 380;
+    const ph = 258;
+    const pcx = GAME_W / 2;
+    const pcy = GAME_H / 2 + 10;
+    push(
+      this.add
+        .rectangle(pcx, pcy, pw + 16, ph + 16, 0x040806, 0.5)
+        .setScrollFactor(0)
+        .setDepth(d + 1),
+    );
+    const panel = this.add
+      .rectangle(pcx, pcy, pw, ph, ZCream, 1)
+      .setStrokeStyle(4, ZFrame)
+      .setScrollFactor(0)
+      .setDepth(d + 2)
+      .setInteractive();
+    push(panel);
+
+    this._eqPickerTitle = this.add
+      .text(pcx, pcy - ph / 2 + 22, "Choose", {
+        fontSize: "16px",
+        color: "#2a1810",
+        fontFamily: "monospace",
+        stroke: "#e8dcc4",
+        strokeThickness: 2,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(d + 4);
+    push(this._eqPickerTitle);
+
+    this._eqPickerEmptyHint = this.add
+      .text(pcx, pcy, "Nothing in your bag fits this slot.", {
+        fontSize: "11px",
+        color: "#5a5048",
+        fontFamily: "monospace",
+        align: "center",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(d + 4)
+      .setVisible(false);
+    push(this._eqPickerEmptyHint);
+
+    const listTop = pcy - ph / 2 + 48;
+    const colW = 168;
+    for (let i = 0; i < 10; i++) {
+      const col = (i / 5) | 0;
+      const row = i % 5;
+      const lx = pcx - pw / 2 + 28 + col * colW;
+      const ly = listTop + row * 38;
+
+      const bg = this.add
+        .rectangle(lx + 72, ly, 144, 34, 0xd4c4a8, 1)
+        .setStrokeStyle(1, 0x4a7a55)
+        .setScrollFactor(0)
+        .setDepth(d + 3);
+      push(bg);
+      const icon = this.add
+        .image(lx + 20, ly, "px_ui_slot_empty")
+        .setScrollFactor(0)
+        .setDepth(d + 5)
+        .setDisplaySize(28, 28);
+      push(icon);
+      const cap = this.add
+        .text(lx + 50, ly, "", {
+          fontSize: "10px",
+          color: "#1a1810",
+          fontFamily: "monospace",
+        })
+        .setOrigin(0, 0.5)
+        .setScrollFactor(0)
+        .setDepth(d + 5);
+      push(cap);
+
+      const zone = this.add
+        .zone(lx + 72, ly, 150, 40)
+        .setScrollFactor(0)
+        .setDepth(d + 8)
+        .setInteractive({ useHandCursor: true });
+      push(zone);
+
+      const cell = { invIndex: /** @type {null | number} */ (null), bg, icon, cap, zone };
+      this._eqPickerCells.push(cell);
+      zone.on("pointerup", () => {
+        if (this._eqPickKind && cell.invIndex != null) {
+          this.equipFromPicker(cell.invIndex, this._eqPickKind);
+        }
+      });
+      zone.on("pointerover", () => {
+        if (cell.invIndex == null) return;
+        const me = this._selfEntity();
+        const s = me?.inventory?.slots?.[cell.invIndex];
+        const p = this.input.activePointer;
+        this.showItemTooltipForCell(s, p.x, p.y);
+      });
+      zone.on("pointerout", () => this.hideItemTooltip());
+    }
+
+    const cyCan = pcy + ph / 2 - 24;
+    push(
+      this.add
+        .rectangle(pcx, cyCan, 120, 30, 0x4a3a48, 1)
+        .setStrokeStyle(2, 0x2a1810)
+        .setScrollFactor(0)
+        .setDepth(d + 4),
+    );
+    const canLab = this.add
+      .text(pcx, cyCan, "Cancel", {
+        fontSize: "11px",
+        color: "#f5f0e8",
+        fontFamily: "monospace",
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(d + 5);
+    push(canLab);
+    const canZ = this.add
+      .zone(pcx, cyCan, 130, 36)
+      .setScrollFactor(0)
+      .setDepth(d + 9)
+      .setInteractive({ useHandCursor: true });
+    push(canZ);
+    canZ.on("pointerup", (ev) => {
+      ev?.stopPropagation?.();
+      this.closeEquipPicker();
+    });
+
+    for (const n of this._eqPickerNodes) {
+      if (n && n.setVisible) n.setVisible(false);
+    }
+  }
+
+  /** @param {string} kind */
+  openEquipPicker(kind) {
+    if (!EQ_KINDS.includes(/** @type {any} */ (kind))) return;
+    this.buildEquipPicker();
+    this._eqPickKind = kind;
+    this._eqPickerOpen = true;
+    this.refreshEquipPickerLayout();
+    for (const n of this._eqPickerNodes) {
+      if (n && n.setVisible) n.setVisible(true);
+    }
+  }
+
+  closeEquipPicker() {
+    this._eqPickKind = null;
+    this._eqPickerOpen = false;
+    this.hideItemTooltip();
+    for (const c of this._eqPickerCells) {
+      c.invIndex = null;
+    }
+    for (const n of this._eqPickerNodes) {
+      if (n && n.setVisible) n.setVisible(false);
+    }
+  }
+
+  refreshEquipPickerLayout() {
+    if (!this._eqPickerBuilt || !this._eqPickKind) return;
+    const kind = this._eqPickKind;
+    this._eqPickerTitle?.setText(`Equip — ${EQ_LABEL[/** @type {"weapon"|"helmet"|"chest"|"boots"} */ (kind)]}`);
+    const me = this._selfEntity();
+    const slots = me?.inventory?.slots || [];
+    /** @type {number[]} */
+    const matchIx = [];
+    for (let i = 0; i < 10; i++) {
+      const s = slots[i];
+      if (s && s.qty > 0 && invTypeMatchesEquipKind(kind, s.type)) matchIx.push(i);
+    }
+    for (let i = 0; i < this._eqPickerCells.length; i++) {
+      const cell = this._eqPickerCells[i];
+      if (i < matchIx.length) {
+        const ix = matchIx[i];
+        const s = slots[ix];
+        cell.invIndex = ix;
+        cell.bg.setVisible(true);
+        cell.icon.setVisible(true);
+        cell.cap.setVisible(true);
+        cell.zone.setVisible(true);
+        this.applyItemIconImage(cell.icon, s);
+        cell.cap.setText(`Slot ${ix + 1} · ${itemShortName(s.type)}`);
+      } else {
+        cell.invIndex = null;
+        cell.bg.setVisible(false);
+        cell.icon.setVisible(false);
+        cell.cap.setVisible(false);
+        cell.zone.setVisible(false);
+      }
+    }
+    this._eqPickerEmptyHint?.setVisible(matchIx.length === 0);
+  }
+
+  /**
+   * @param {number} invSlot
+   * @param {string} kind
+   */
+  equipFromPicker(invSlot, kind) {
+    if (!this.socket?.connected) return;
+    const me = this._selfEntity();
+    const s = me?.inventory?.slots?.[invSlot];
+    if (!s || s.qty < 1 || !invTypeMatchesEquipKind(kind, s.type)) return;
+    this.socket.emit("equipGear", { inventorySlot: invSlot, slot: kind });
+    this.closeEquipPicker();
   }
 
   createEquipmentPanel() {
@@ -2518,7 +3232,7 @@ export class GameScene extends Phaser.Scene {
         .text(
           cx,
           cy - h / 2 + 50,
-          "I / Esc  ·  Tab = bag  ·  drag item here or choose # + Equip",
+          "I / Esc · Tab = bag · Equip opens matching items · Hover icon = stats",
           {
             fontSize: "9px",
             color: "#4a3830",
@@ -2532,7 +3246,21 @@ export class GameScene extends Phaser.Scene {
 
     const rowY0 = cy - h / 2 + 84;
     const rowStep = 56;
-    const leftX = cx - w / 2 + 16;
+    /** `ZInner` panel is `w+4` wide; lay out against real inner edges so buttons stay inside the frame. */
+    const innerHalfW = (w + 4) / 2;
+    const innerLeft = cx - innerHalfW;
+    const innerRight = cx + innerHalfW;
+    const sidePad = 14;
+    const leftX = innerLeft + sidePad;
+    const clearW = 56;
+    const clearH = 28;
+    const equipBtnW = 92;
+    const equipBtnH = 30;
+    const btnGap = 10;
+    const equipCx = innerRight - sidePad - equipBtnW / 2;
+    const clearCx = equipCx - equipBtnW / 2 - btnGap - clearW / 2;
+    const rowStripRight = clearCx - clearW / 2 - btnGap;
+    const rowStripW = Math.max(160, rowStripRight - leftX);
     let ri = 0;
     for (const eqKind of EQ_KINDS) {
       const ry = rowY0 + ri * rowStep;
@@ -2540,7 +3268,8 @@ export class GameScene extends Phaser.Scene {
 
       push(
         this.add
-          .rectangle(leftX, ry, w - 32, 48, 0xcfc0a8, 0.35)
+          .rectangle(leftX, ry, rowStripW, 48, 0xcfc0a8, 0.35)
+          .setOrigin(0, 0.5)
           .setStrokeStyle(1, 0x5a8a5a)
           .setScrollFactor(0)
           .setDepth(d + 5),
@@ -2575,7 +3304,7 @@ export class GameScene extends Phaser.Scene {
 
       const textX = leftX + 118;
       const nameLine = this.add
-        .text(textX, ry - 12, "(empty slot)", {
+        .text(textX, ry, "—", {
           fontSize: "12px",
           color: "#2a1810",
           fontFamily: "monospace",
@@ -2586,23 +3315,27 @@ export class GameScene extends Phaser.Scene {
       push(nameLine);
       this._eqNameTexts[eqKind] = nameLine;
 
-      const statLine = this.add
-        .text(textX, ry + 12, "—", {
-          fontSize: "10px",
-          color: "#4a4038",
-          fontFamily: "monospace",
-          wordWrap: { width: 260 },
-        })
-        .setOrigin(0, 0.5)
+      const hitZ = this.add
+        .zone(iconX, ry, 52, 52)
         .setScrollFactor(0)
-        .setDepth(d + 7);
-      push(statLine);
-      this._eqStatTexts[eqKind] = statLine;
+        .setDepth(d + 10)
+        .setInteractive();
+      push(hitZ);
+      this._eqIconHitZones[eqKind] = hitZ;
+      hitZ.on("pointerover", () => {
+        const me = this._selfEntity();
+        const ix = normalizeEquipInvIndex(me?.inventory?.equipment?.[eqKind]);
+        const cell = ix != null ? me?.inventory?.slots?.[ix] : null;
+        const p = this.input.activePointer;
+        this.showItemTooltipForCell(
+          cell && cell.qty > 0 ? cell : null,
+          p.x,
+          p.y,
+        );
+      });
+      hitZ.on("pointerout", () => this.hideItemTooltip());
 
       const btnY = ry;
-      const clearW = 56;
-      const clearH = 28;
-      const clearCx = cx + w / 2 - 130;
       push(
         this.add
           .rectangle(clearCx, btnY, clearW, clearH, 0x6b3830, 1)
@@ -2629,12 +3362,21 @@ export class GameScene extends Phaser.Scene {
       push(stripZ);
       stripZ.on("pointerup", () => this.stripEquipKind(eqKind));
 
-      const dropW = 96;
-      const dropH = 30;
-      const equipCx = cx + w / 2 - 48;
+      /** Zone for drag-from-bag only — must NOT overlap Equip or global pointerup steals clicks. */
+      const equipLeftEdge = equipCx - equipBtnW / 2 - 8;
+      const dragLeft = iconX - 26;
+      const dragHitW = Math.max(48, equipLeftEdge - dragLeft);
+      const dragHitCx = dragLeft + dragHitW / 2;
+      const dragHitZ = this.add
+        .zone(dragHitCx, btnY, dragHitW, 50)
+        .setScrollFactor(0)
+        .setDepth(d + 5);
+      push(dragHitZ);
+      this._eqDropZones[eqKind] = dragHitZ;
+
       push(
         this.add
-          .rectangle(equipCx, btnY, dropW, dropH, 0x284830, 1)
+          .rectangle(equipCx, btnY, equipBtnW, equipBtnH, 0x284830, 1)
           .setStrokeStyle(2, 0x3d6c48)
           .setScrollFactor(0)
           .setDepth(d + 6),
@@ -2650,14 +3392,16 @@ export class GameScene extends Phaser.Scene {
           .setScrollFactor(0)
           .setDepth(d + 7),
       );
-      const dropZ = this.add
-        .zone(equipCx, btnY, dropW + 10, dropH + 10)
+      const equipClickZ = this.add
+        .zone(equipCx, btnY, equipBtnW + 10, equipBtnH + 10)
         .setScrollFactor(0)
         .setDepth(d + 9)
         .setInteractive({ useHandCursor: true });
-      push(dropZ);
-      dropZ.on("pointerup", () => this.tryEquipSelectionToKind(eqKind));
-      this._eqDropZones[eqKind] = dropZ;
+      push(equipClickZ);
+      equipClickZ.on("pointerup", (ev) => {
+        ev?.stopPropagation?.();
+        this.openEquipPicker(eqKind);
+      });
     }
 
     this.setEquipmentPanelVisible(false);
@@ -2668,7 +3412,7 @@ export class GameScene extends Phaser.Scene {
       const ptr = this.input.activePointer;
       for (const k of EQ_KINDS) {
         const z = this._eqDropZones[k];
-        if (!z || !z.input || !z.active) continue;
+        if (!z || !z.active) continue;
         const b = z.getBounds();
         if (b.contains(ptr.x, ptr.y)) {
           this.tryEquipDragToKind(k);
@@ -2693,6 +3437,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   closeEquipmentPanel() {
+    this.closeEquipPicker();
     this._equipmentPanelOpen = false;
     this._eqDragInvIndex = null;
     this.setEquipmentPanelVisible(false);
@@ -2713,34 +3458,19 @@ export class GameScene extends Phaser.Scene {
       const idx = eq[kind];
       const icon = this._eqIconImages[kind];
       const nameT = this._eqNameTexts[kind];
-      const statT = this._eqStatTexts[kind];
-      if (!nameT || !statT || !icon) continue;
+      if (!nameT || !icon) continue;
       const cell = Number.isInteger(idx) ? slots[idx] : null;
       if (cell && cell.qty > 0 && invTypeMatchesEquipKind(kind, cell.type)) {
         this.applyItemIconImage(icon, cell);
-        nameT.setText(`${itemShortName(cell.type)}  ·  bag slot ${(idx ?? 0) + 1}`);
+        nameT.setText(`${itemShortName(cell.type)} · bag #${(idx ?? 0) + 1}`);
         nameT.setColor("#1a1810");
-        const st = formatGearStatsReadable(cell.meta);
-        statT.setText(st || "—");
-        statT.setColor("#3d3028");
       } else {
         this.applyItemIconImage(icon, null);
-        nameT.setText("(empty slot)");
+        nameT.setText("Empty — click Equip");
         nameT.setColor("#5a5048");
-        statT.setText("Use Equip after selecting matching gear in bag");
-        statT.setColor("#6a6058");
       }
     }
-  }
-
-  tryEquipSelectionToKind(kind) {
-    if (!this.socket?.connected) return;
-    const src = this._eqDragInvIndex != null ? this._eqDragInvIndex : this.selectedSlotIndex;
-    this._eqDragInvIndex = null;
-    const me = this._selfEntity();
-    const s = me?.inventory?.slots?.[src];
-    if (!s || s.qty < 1 || !invTypeMatchesEquipKind(kind, s.type)) return;
-    this.socket.emit("equipGear", { inventorySlot: src, slot: kind });
+    if (this._eqPickerOpen) this.refreshEquipPickerLayout();
   }
 
   tryEquipDragToKind(kind) {

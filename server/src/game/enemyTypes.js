@@ -1,3 +1,5 @@
+import { getProceduralEnemyDef, isProceduralEnemyType } from "./procedural/enemyProc.js";
+
 /**
  * Server-authoritative enemy definitions: stats, cooldowns, aggro, loot profile.
  * Loot kinds: `coin`, `bread`, or `gear` (weapon / armor / potion with rarity via `loot.js`).
@@ -66,6 +68,7 @@ export const ENEMY_DEFS = {
 
 /** @param {string} type */
 export function getEnemyDef(type) {
+  if (isProceduralEnemyType(type)) return getProceduralEnemyDef(type);
   const d = ENEMY_DEFS[type];
   if (d) return d;
   return ENEMY_DEFS.skeleton;

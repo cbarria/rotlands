@@ -3,6 +3,8 @@ import { normalizeEquipment, recalculateCombatStats } from "./equipment.js";
 import { getEnemyDef } from "./enemyTypes.js";
 import { rollLootDropFromEnemy } from "./loot.js";
 import { SHOPKEEPER } from "./shop.js";
+import { buildGeneratedZone } from "./procedural/mapGen.js";
+import { hashString } from "./procedural/itemNames.js";
 
 /** @typedef {"up"|"down"|"left"|"right"} Dir */
 
@@ -15,6 +17,16 @@ export const TILE = {
   ROCK: 4,
   /** Walkable tall grass / flowers — visual variety only. */
   GRASS_PATCH: 5,
+  /** Hazard — not walkable. */
+  LAVA: 6,
+  /** Water — not walkable unless overridden by generator islands. */
+  WATER: 7,
+  /** Desert floor. */
+  SAND: 8,
+  /** Ice / tundra floor. */
+  SNOW: 9,
+  /** Dungeon / volcanic floor. */
+  STONE: 10,
 };
 export const MAP_W = 24;
 export const MAP_H = 18;
@@ -25,6 +37,9 @@ export const MAP_LABELS = {
   forest: "Forest",
   dungeon1: "Dungeon I",
   dungeon2: "Dungeon II",
+  wilds: "Wild Forest",
+  wilds_d1: "Ruined Depths",
+  wilds_d2: "Lava Caldera",
 };
 
 /** @param {string | undefined} mapId */
@@ -77,11 +92,12 @@ const SPAWN_JOB_DEFER_MS = 400;
  *   id: string,
  *   combatAllowed: boolean,
  *   tiles: number[][],
- *   portals: Array<{ x: number, y: number, toMap: string, toX: number, toY: number }>,
- *   enemies: Map<number, LiveEnemy>,
- *   groundItems: Map<number, any>,
- *   spawnZones: SpawnZone[],
- * }} MapZone
+ *   portals: Array<{ x: number, y: number, toMap: string, toX: number, toY: number, kind?: string }>,
+  *   enemies: Map<number, LiveEnemy>,
+  *   groundItems: Map<number, any>,
+  *   spawnZones: SpawnZone[],
+  *   biome?: string,
+  * }} MapZone
  */
 
 /** @returns {number} delay in [5000, 10000) ms */
@@ -117,7 +133,7 @@ function shuffleCoords(coords) {
  * @returns {LiveEnemy}
  */
 function makeEnemyEntity(id, mapId, enemyType, x, y, spawnZoneId, def) {
-  return {
+  const e = {
     id,
     mapId,
     kind: "enemy",
@@ -133,6 +149,16 @@ function makeEnemyEntity(id, mapId, enemyType, x, y, spawnZoneId, def) {
     attackCd: 0,
     respawnDelayMs: rollRespawnDelayMs(),
   };
+  const pr = /** @type {{ procName?: string, paletteId?: number, tier?: string, behavior?: string } | undefined} */ (
+    /** @type {any} */ (def).proc
+  );
+  if (pr) {
+    /** @type {any} */ (e).procName = pr.procName;
+    /** @type {any} */ (e).paletteId = pr.paletteId;
+    /** @type {any} */ (e).tier = pr.tier;
+    /** @type {any} */ (e).behavior = pr.behavior;
+  }
+  return e;
 }
 
 /**
@@ -167,7 +193,14 @@ function seedSpawnZones(zone, allocId) {
 export function walkable(tiles, x, y) {
   if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) return false;
   const t = tiles[y][x];
-  return t === TILE.GRASS || t === TILE.PORTAL || t === TILE.GRASS_PATCH;
+  return (
+    t === TILE.GRASS ||
+    t === TILE.PORTAL ||
+    t === TILE.GRASS_PATCH ||
+    t === TILE.SAND ||
+    t === TILE.SNOW ||
+    t === TILE.STONE
+  );
 }
 
 /** @returns damage actually applied after armor */
@@ -252,8 +285,12 @@ function makeTownZone() {
   for (let x = 6; x < 12; x++) tiles[6][x] = TILE.WALL;
   for (let y = 10; y < 14; y++) tiles[y][8] = TILE.WALL;
 
-  const portals = [{ x: 21, y: 9, toMap: "forest", toX: 2, toY: 9 }];
+  const portals = [
+    { x: 21, y: 9, toMap: "forest", toX: 2, toY: 9 },
+    { x: 3, y: 14, toMap: "wilds", toX: 12, toY: 9, kind: "blue" },
+  ];
   tiles[9][21] = TILE.PORTAL;
+  tiles[14][3] = TILE.PORTAL;
 
   const townNoProps = [
     [21, 9],
@@ -261,6 +298,11 @@ function makeTownZone() {
     [22, 9],
     [21, 8],
     [21, 10],
+    [3, 14],
+    [2, 14],
+    [4, 14],
+    [3, 13],
+    [3, 15],
     [4, 8],
     [3, 8],
     [5, 8],
@@ -294,6 +336,12 @@ function defaultSpawnForMap(mapId) {
     case "dungeon1":
       return [10, 10];
     case "dungeon2":
+      return [10, 12];
+    case "wilds":
+      return [12, 9];
+    case "wilds_d1":
+      return [10, 10];
+    case "wilds_d2":
       return [10, 12];
     case "town":
     default:
@@ -611,10 +659,59 @@ export class World {
     const forest = makeForestZone(() => this._allocId());
     const dungeon1 = makeDungeon1Zone(() => this._allocId());
     const dungeon2 = makeDungeon2Zone(() => this._allocId());
+
+    const wildsBase = buildGeneratedZone({
+      id: "wilds",
+      biome: "forest",
+      seed: 424242,
+      portalRed: { toMap: "town", toX: 3, toY: 14 },
+      portalBlue: { toMap: "wilds_d1", toX: 2, toY: 2 },
+    });
+    /** @type {MapZone} */
+    const wilds = {
+      ...wildsBase,
+      enemies: new Map(),
+      groundItems: new Map(),
+    };
+    seedSpawnZones(wilds, () => this._allocId());
+
+    const wd1Base = buildGeneratedZone({
+      id: "wilds_d1",
+      biome: "dungeon",
+      seed: 77123,
+      portalRed: { toMap: "wilds", toX: 21, toY: 9 },
+      portalBlue: { toMap: "wilds_d2", toX: 3, toY: 3 },
+    });
+    /** @type {MapZone} */
+    const wilds_d1 = {
+      ...wd1Base,
+      enemies: new Map(),
+      groundItems: new Map(),
+    };
+    seedSpawnZones(wilds_d1, () => this._allocId());
+
+    const wd2Base = buildGeneratedZone({
+      id: "wilds_d2",
+      biome: "lava",
+      seed: 90001,
+      portalRed: { toMap: "wilds_d1", toX: 21, toY: 15 },
+      portalBlue: null,
+    });
+    /** @type {MapZone} */
+    const wilds_d2 = {
+      ...wd2Base,
+      enemies: new Map(),
+      groundItems: new Map(),
+    };
+    seedSpawnZones(wilds_d2, () => this._allocId());
+
     this.mapZones.set(town.id, town);
     this.mapZones.set(forest.id, forest);
     this.mapZones.set(dungeon1.id, dungeon1);
     this.mapZones.set(dungeon2.id, dungeon2);
+    this.mapZones.set(wilds.id, wilds);
+    this.mapZones.set(wilds_d1.id, wilds_d1);
+    this.mapZones.set(wilds_d2.id, wilds_d2);
 
     this._spawnTownItems();
 
@@ -865,6 +962,9 @@ export class World {
       gold: Math.max(0, (rec.gold ?? 0) | 0),
       lastMove: 0,
       attackCd: 0,
+      avatarHue: hashString(String(rec.name || "hero")) % 360,
+      partyId: null,
+      partyHue: null,
     };
     recalculateCombatStats(p);
     this.players.set(socketId, p);
@@ -1086,6 +1186,9 @@ export class World {
         x: Math.trunc(p.x),
         y: Math.trunc(p.y),
         hp: Math.trunc(p.hp),
+        avatarHue: p.avatarHue ?? hashString(String(p.name)) % 360,
+        partyId: p.partyId ?? null,
+        partyHue: p.partyHue ?? null,
         inventory: {
           slots: slotSnap,
           weaponBonus: p.weaponBonus | 0,
@@ -1112,6 +1215,15 @@ export class World {
       });
     }
     for (const e of zone.enemies.values()) {
+      const ee = /** @type {any} */ (e);
+      /** @type {Record<string, unknown>} */
+      const procSnap = {};
+      if (ee.procName) {
+        procSnap.procName = ee.procName;
+        procSnap.paletteId = ee.paletteId;
+        procSnap.tier = ee.tier;
+        procSnap.behavior = ee.behavior;
+      }
       entities.push({
         id: e.id,
         kind: "enemy",
@@ -1120,6 +1232,7 @@ export class World {
         y: Math.trunc(e.y),
         hp: Math.trunc(e.hp),
         maxHp: Math.trunc(e.maxHp ?? e.hp),
+        ...procSnap,
       });
     }
     for (const it of zone.groundItems.values()) {
@@ -1135,6 +1248,8 @@ export class World {
     return {
       mapId,
       zoneLabel: MAP_LABELS[mapId] || mapId,
+      biome: zone.biome ?? null,
+      portals: zone.portals.map((po) => ({ ...po })),
       combatAllowed: zone.combatAllowed,
       map: { w: MAP_W, h: MAP_H, tiles: zone.tiles },
       entities,

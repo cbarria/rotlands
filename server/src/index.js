@@ -27,6 +27,7 @@ import {
   trySellSlot,
 } from "./game/shop.js";
 import { World } from "./game/World.js";
+import { partyInvite, partyAccept, partyLeave, onPlayerDisconnect } from "./game/party.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 const NODE_ENV = process.env.NODE_ENV || "development";
@@ -375,7 +376,45 @@ io.on("connection", (socket) => {
     io.to(`map:${p.mapId}`).emit("chat", { name, text });
   });
 
+  socket.on("party_invite", (payload) => {
+    const p = world.players.get(socket.id);
+    if (!p || p.hp <= 0) return;
+    const targetName = String(payload?.targetName || "").trim();
+    if (!targetName) return;
+    const r = partyInvite(world, socket.id, targetName);
+    if (!r.ok) {
+      socket.emit("party_notice", { message: r.reason === "no_target" ? "player_not_found" : "invite_failed" });
+      return;
+    }
+    const inv = world.players.get(socket.id);
+    const nm = String(inv?.name || "traveler").slice(0, 24);
+    io.to(r.targetSid).emit("party_invited", { from: nm });
+    socket.emit("party_notice", { message: "invite_sent" });
+  });
+
+  socket.on("party_accept", (payload) => {
+    const p = world.players.get(socket.id);
+    if (!p || p.hp <= 0) return;
+    const inviterName = String(payload?.inviterName || "").trim();
+    if (!inviterName) return;
+    const ok = partyAccept(world, socket.id, inviterName);
+    if (!ok) {
+      socket.emit("party_notice", { message: "party_accept_failed" });
+      return;
+    }
+    for (const mid of world.allMapIds()) broadcastMap(mid);
+    socket.emit("party_notice", { message: "joined_party" });
+  });
+
+  socket.on("party_leave", () => {
+    if (!world.players.get(socket.id)) return;
+    partyLeave(world, socket.id);
+    for (const mid of world.allMapIds()) broadcastMap(mid);
+    socket.emit("party_notice", { message: "left_party" });
+  });
+
   socket.on("disconnect", async () => {
+    onPlayerDisconnect(world, socket.id);
     const p = world.players.get(socket.id);
     const mapId = p?.mapId;
     await persistPlayer(socket.id);

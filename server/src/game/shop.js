@@ -1,5 +1,10 @@
 import { MAX_SLOTS, POTION_HEAL, addItemToSlots } from "./inventory.js";
-import { clearEquipmentReferencingSlot } from "./equipment.js";
+import {
+  clearEquipmentReferencingSlot,
+  isInventorySlotEquipped,
+  normalizeEquipment,
+} from "./equipment.js";
+import { iconHueFromMeta } from "./procedural/itemNames.js";
 
 export const SHOPKEEPER = {
   id: 900001,
@@ -74,7 +79,13 @@ export function tryBuyPotion(p) {
  */
 export function tryBuyWeapon(p) {
   if (p.gold < WEAPON_BUY_PRICE) return false;
-  const meta = { rarity: "common", dmg: 6, def: 0, hp: 1 };
+  const meta = {
+    rarity: "common",
+    dmg: 6,
+    def: 0,
+    hp: 1,
+    iconHue: iconHueFromMeta("common", "weapon", { dmg: 6, def: 0, hp: 1 }),
+  };
   if (!addItemToSlots(p.slots, "weapon", meta)) return false;
   p.gold -= WEAPON_BUY_PRICE;
   return true;
@@ -86,15 +97,24 @@ export function tryBuyWeapon(p) {
  * @returns {boolean}
  */
 export function trySellSlot(p, slotIndex) {
-  if (slotIndex < 0 || slotIndex >= MAX_SLOTS) return false;
+  if (slotIndex < 0 || slotIndex >= MAX_SLOTS || !Number.isInteger(slotIndex)) return false;
+  if (!p.equipment || typeof p.equipment !== "object") {
+    p.equipment = normalizeEquipment(null);
+  }
+  p.equipment = normalizeEquipment(p.equipment);
+  // Do not recalculateCombatStats here: it can clear eq.weapon/etc when validating
+  // cells, which would make isInventorySlotEquipped false and allow selling worn gear.
+  if (isInventorySlotEquipped(p, slotIndex)) return false;
   const s = p.slots[slotIndex];
   if (!s || s.qty < 1) return false;
   const unit = sellPriceForCell(s);
   if (unit <= 0) return false;
-  clearEquipmentReferencingSlot(p, slotIndex);
   p.gold += unit;
   s.qty -= 1;
-  if (s.qty <= 0) p.slots[slotIndex] = null;
+  if (s.qty <= 0) {
+    p.slots[slotIndex] = null;
+    clearEquipmentReferencingSlot(p, slotIndex);
+  }
   return true;
 }
 

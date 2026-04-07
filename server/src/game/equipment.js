@@ -1,4 +1,4 @@
-import { MAX_HP, POTION_HEAL, WEAPON_DAMAGE_BONUS } from "./inventory.js";
+import { MAX_HP, MAX_SLOTS, POTION_HEAL, WEAPON_DAMAGE_BONUS } from "./inventory.js";
 
 /**
  * @typedef {{
@@ -16,14 +16,31 @@ export const EMPTY_EQUIPMENT = Object.freeze({
   boots: null,
 });
 
+/**
+ * Inventory indices in equipment JSON sometimes arrive as strings from DB/clients.
+ * @param {any} v
+ * @returns {null | number}
+ */
+export function normalizeEquipSlotRef(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "number" && Number.isInteger(v)) {
+    return v >= 0 && v < MAX_SLOTS ? v : null;
+  }
+  if (typeof v === "string") {
+    const n = Number(v.trim());
+    if (Number.isInteger(n) && n >= 0 && n < MAX_SLOTS) return n;
+  }
+  return null;
+}
+
 /** @param {any} raw */
 export function normalizeEquipment(raw) {
   const e = raw && typeof raw === "object" ? raw : {};
   return {
-    weapon: Number.isInteger(e.weapon) ? e.weapon : null,
-    helmet: Number.isInteger(e.helmet) ? e.helmet : null,
-    chest: Number.isInteger(e.chest) ? e.chest : null,
-    boots: Number.isInteger(e.boots) ? e.boots : null,
+    weapon: normalizeEquipSlotRef(e.weapon),
+    helmet: normalizeEquipSlotRef(e.helmet),
+    chest: normalizeEquipSlotRef(e.chest),
+    boots: normalizeEquipSlotRef(e.boots),
   };
 }
 
@@ -35,8 +52,21 @@ export function normalizeEquipment(raw) {
 export function clearEquipmentReferencingSlot(p, slotIndex) {
   const eq = p.equipment;
   for (const k of /** @type {(keyof EquipmentSlots)[]} */ (["weapon", "helmet", "chest", "boots"])) {
-    if (eq[k] === slotIndex) eq[k] = null;
+    if (normalizeEquipSlotRef(eq[k]) === slotIndex) eq[k] = null;
   }
+}
+
+/**
+ * @param {{ equipment: EquipmentSlots }} p
+ * @param {number} slotIndex
+ */
+export function isInventorySlotEquipped(p, slotIndex) {
+  const eq = p.equipment;
+  if (!eq || !Number.isInteger(slotIndex)) return false;
+  for (const k of /** @type {(keyof EquipmentSlots)[]} */ (["weapon", "helmet", "chest", "boots"])) {
+    if (normalizeEquipSlotRef(eq[k]) === slotIndex) return true;
+  }
+  return false;
 }
 
 /**
@@ -48,8 +78,10 @@ export function recalculateCombatStats(p) {
   let def = 0;
   let hpB = 0;
 
-  if (eq.weapon != null) {
-    const c = p.slots[eq.weapon];
+  const wIdx = normalizeEquipSlotRef(eq.weapon);
+  eq.weapon = wIdx;
+  if (wIdx != null) {
+    const c = p.slots[wIdx];
     if (c?.type === "weapon" && c.qty > 0) {
       const m = c.meta && typeof c.meta === "object" ? c.meta : {};
       const md = Number(m.dmg);
@@ -62,7 +94,8 @@ export function recalculateCombatStats(p) {
   }
 
   const addArmor = (/** @type {"helmet"|"chest"|"boots"} */ key, /** @type {string} */ typ) => {
-    const idx = eq[key];
+    const idx = normalizeEquipSlotRef(eq[key]);
+    eq[key] = idx;
     if (idx == null) return;
     const c = p.slots[idx];
     if (c?.type !== typ || c.qty < 1) {
@@ -108,28 +141,30 @@ export function tryInteractInventorySlot(p, slotIndex) {
   }
 
   if (t === "weapon") {
-    if (p.equipment.weapon === slotIndex) p.equipment.weapon = null;
-    else {
-      p.equipment.weapon = slotIndex;
-    }
+    const cur = normalizeEquipSlotRef(p.equipment.weapon);
+    if (cur === slotIndex) p.equipment.weapon = null;
+    else p.equipment.weapon = slotIndex;
     recalculateCombatStats(p);
     return true;
   }
 
   if (t === "armor_helmet") {
-    if (p.equipment.helmet === slotIndex) p.equipment.helmet = null;
+    const cur = normalizeEquipSlotRef(p.equipment.helmet);
+    if (cur === slotIndex) p.equipment.helmet = null;
     else p.equipment.helmet = slotIndex;
     recalculateCombatStats(p);
     return true;
   }
   if (t === "armor_chest") {
-    if (p.equipment.chest === slotIndex) p.equipment.chest = null;
+    const cur = normalizeEquipSlotRef(p.equipment.chest);
+    if (cur === slotIndex) p.equipment.chest = null;
     else p.equipment.chest = slotIndex;
     recalculateCombatStats(p);
     return true;
   }
   if (t === "armor_boots") {
-    if (p.equipment.boots === slotIndex) p.equipment.boots = null;
+    const cur = normalizeEquipSlotRef(p.equipment.boots);
+    if (cur === slotIndex) p.equipment.boots = null;
     else p.equipment.boots = slotIndex;
     recalculateCombatStats(p);
     return true;
