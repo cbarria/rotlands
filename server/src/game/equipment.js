@@ -45,6 +45,28 @@ export function normalizeEquipment(raw) {
 }
 
 /**
+ * Bag indices currently referenced by equipment (explicit list for clients / tools).
+ * @param {any} rawEquipment
+ * @returns {number[]}
+ */
+export function equippedBagSlotIndices(rawEquipment) {
+  const e = normalizeEquipment(rawEquipment);
+  /** @type {number[]} */
+  const out = [];
+  for (const v of Object.values(e)) {
+    const i = normalizeEquipSlotRef(v);
+    if (i != null) out.push(i);
+  }
+  return out;
+}
+
+/** @param {any} cell */
+function invCellQtyOk(cell) {
+  const q = Number(cell?.qty);
+  return Number.isFinite(q) && q >= 1;
+}
+
+/**
  * Clear equipment keys that point at `slotIndex`.
  * @param {{ equipment: EquipmentSlots }} p
  * @param {number} slotIndex
@@ -94,7 +116,8 @@ export function recalculateCombatStats(p) {
   eq.weapon = wIdx;
   if (wIdx != null) {
     const c = p.slots[wIdx];
-    if (c?.type === "weapon" && c.qty > 0) {
+    const isWeapon = c && String(c.type || "").toLowerCase() === "weapon";
+    if (isWeapon && invCellQtyOk(c)) {
       const m = c.meta && typeof c.meta === "object" ? c.meta : {};
       const md = Number(m.dmg);
       dmg += Number.isFinite(md) ? md : WEAPON_DAMAGE_BONUS;
@@ -110,7 +133,7 @@ export function recalculateCombatStats(p) {
     eq[key] = idx;
     if (idx == null) return;
     const c = p.slots[idx];
-    if (c?.type !== typ || c.qty < 1) {
+    if (!c || String(c.type || "") !== typ || !invCellQtyOk(c)) {
       eq[key] = null;
       return;
     }

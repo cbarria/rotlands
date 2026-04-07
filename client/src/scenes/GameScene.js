@@ -85,16 +85,37 @@ function normalizeEquipInvIndex(v) {
 
 /** Slots currently worn (same basis as gold frame in bag / hotbar). */
 function wornInventorySlotSet(me) {
-  const eq = me?.inventory?.equipment;
   /** @type {Set<number>} */
   const worn = new Set();
+  const snapSlots = me?.inventory?.equippedBagSlots;
+  if (Array.isArray(snapSlots)) {
+    for (const raw of snapSlots) {
+      const ix = normalizeEquipInvIndex(raw);
+      if (ix != null) worn.add(ix);
+    }
+  }
+  const eq = me?.inventory?.equipment;
   if (eq && typeof eq === "object") {
-    for (const v of Object.values(eq)) {
-      const ix = normalizeEquipInvIndex(v);
+    for (const k of ["weapon", "helmet", "chest", "boots"]) {
+      const ix = normalizeEquipInvIndex(eq[k]);
+      if (ix != null) worn.add(ix);
+    }
+    for (const k of Object.keys(eq)) {
+      const ix = normalizeEquipInvIndex(eq[k]);
       if (ix != null) worn.add(ix);
     }
   }
   return worn;
+}
+
+/** @param {any} e @param {any} selfId */
+function entityIsSelfPlayer(e, selfId) {
+  return (
+    e != null &&
+    selfId != null &&
+    e.kind === "player" &&
+    (e.id === selfId || Number(e.id) === Number(selfId))
+  );
 }
 
 /** @param {any} me @param {number} slotIndex */
@@ -466,7 +487,7 @@ export class GameScene extends Phaser.Scene {
     const hasEnt =
       this.selfId != null &&
       Array.isArray(this._lastSnap?.entities) &&
-      this._lastSnap.entities.some((e) => e.id === this.selfId);
+      this._lastSnap.entities.some((e) => entityIsSelfPlayer(e, this.selfId));
     if (hasTiles && hasEnt) {
       this._loadHintText.destroy();
       this._loadHintText = null;
@@ -1595,7 +1616,7 @@ export class GameScene extends Phaser.Scene {
         if (ev.killed) {
           this.runEnemyDeathFade(cont, ev.targetId);
         } else {
-          const me = this._lastSnap?.entities?.find((e) => e.id === this.selfId && e.kind === "player");
+          const me = this._lastSnap?.entities?.find((e) => entityIsSelfPlayer(e, this.selfId));
           const tgt = this._lastSnap?.entities?.find((e) => e.id === ev.targetId);
           let dx = 0;
           let dy = 0;
@@ -2011,7 +2032,7 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    const me = snap.entities.find((e) => e.id === this.selfId && e.kind === "player");
+    const me = snap.entities.find((e) => entityIsSelfPlayer(e, this.selfId));
     if (me) {
       if (
         this._shopPopupOpen &&
@@ -2283,12 +2304,12 @@ export class GameScene extends Phaser.Scene {
    * @returns {number[]}
    */
   collectSellableSlots(me) {
-    const slots = me?.inventory?.slots || [];
+    const rawSlots = me?.inventory?.slots;
     const worn = wornInventorySlotSet(me);
     const out = [];
-    for (let i = 0; i < slots.length; i++) {
-      const s = slots[i];
-      if (!s || s.qty < 1) continue;
+    for (let i = 0; i < INV_MAX_SLOTS; i++) {
+      const s = Array.isArray(rawSlots) ? rawSlots[i] : null;
+      if (!s || Number(s.qty) < 1) continue;
       if (worn.has(i)) continue;
       if (shopSellUnitGold(s) > 0) out.push(i);
     }
@@ -2312,7 +2333,9 @@ export class GameScene extends Phaser.Scene {
         labels.push("(nothing to sell — unequip in GEAR first)", "Back");
       } else {
         for (const si of slotIdxs) {
-          const s = me.inventory.slots[si];
+          const inv = me.inventory || {};
+          const arr = inv.slots;
+          const s = Array.isArray(arr) ? arr[si] : null;
           const u = shopSellUnitGold(s);
           labels.push(`Slot ${si + 1}: ${s.type} x${s.qty}  (+${u}g ea)`);
         }
@@ -3494,7 +3517,7 @@ export class GameScene extends Phaser.Scene {
   _selfEntity() {
     const snap = this._lastSnap;
     if (!snap?.entities || this.selfId == null) return null;
-    return snap.entities.find((e) => e.id === this.selfId && e.kind === "player") ?? null;
+    return snap.entities.find((e) => entityIsSelfPlayer(e, this.selfId)) ?? null;
   }
 
   /**
@@ -3512,7 +3535,7 @@ export class GameScene extends Phaser.Scene {
     if (!this.mapData || this.selfId == null) return null;
     const snap = this._lastSnap;
     if (!snap) return null;
-    const me = snap.entities.find((e) => e.id === this.selfId && e.kind === "player");
+    const me = snap.entities.find((e) => entityIsSelfPlayer(e, this.selfId));
     if (!me) return null;
     let best = null;
     let bestD = 9;

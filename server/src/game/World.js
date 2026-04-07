@@ -1,5 +1,9 @@
 import { BASE_MELEE_DAMAGE, MAX_HP, MAX_SLOTS } from "./inventory.js";
-import { normalizeEquipment, recalculateCombatStats } from "./equipment.js";
+import {
+  equippedBagSlotIndices,
+  normalizeEquipment,
+  recalculateCombatStats,
+} from "./equipment.js";
 import { getEnemyDef } from "./enemyTypes.js";
 import { rollLootDropFromEnemy } from "./loot.js";
 import { SHOPKEEPER } from "./shop.js";
@@ -1196,6 +1200,8 @@ export class World {
           maxHp: MAX_HP + (p.gearMaxHpBonus | 0),
           // Always normalize so clients never see string indices / odd JSON shapes from DB.
           equipment: normalizeEquipment(p.equipment),
+          // Redundant with `equipment`, but primitive[] survives odd client merges / deser bugs.
+          equippedBagSlots: equippedBagSlotIndices(p.equipment),
         },
         gold: p.gold | 0,
       });
